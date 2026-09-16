@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Recorder — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="history">
+<div class="wrap">
+  <section>
+    <div class="section-head"><h2>Flight Recorder — Continue Watching</h2>
+      <span class="sub" id="hist-sub"></span>
+      <button class="btn ghost small" id="hist-clear" style="margin-left:auto">CLEAR ALL</button>
+    </div>
+    <div id="hist-list"></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+
+  J.runBoot([{ label: 'HUD shell', run: () => 'OK' }])
+    .then(() => { J.buildShell(); J.footer(); load(); });
+
+  function load() {
+    J.getJSON('/api/history')
+      .then(d => render(d.items || []))
+      .catch(e => {
+        $('#hist-list').innerHTML = '<div class="blocker small"><h3>RECORDER OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
+      });
+  }
+
+  function render(items) {
+    $('#hist-sub').textContent = items.length + ' RECORDS';
+    if (!items.length) {
+      $('#hist-list').innerHTML = '<div class="blocker small"><h3>NO FLIGHT RECORDS</h3><p>Start a transmission and J.A.R.V.I.S. will track your position.</p></div>';
+      return;
+    }
+    $('#hist-list').innerHTML = items.map(r => {
+      const isTv = r.mediaType === 'tv';
+      const label = isTv ? (r.title || 'Series') : (r.title || 'Film');
+      const href = isTv
+        ? '/watch/tv/' + r.tmdbId + '/' + (r.season || 1) + '/' + (r.episode || 1)
+        : '/watch/movie/' + r.tmdbId;
+      const pct = r.pct != null ? Math.min(100, r.pct) : 0;
+      return '<div class="hist-row">' +
+        '<a href="' + J.esc(href) + '" class="still-link">' +
+        (r.poster ? '<img class="still" loading="lazy" src="' + J.esc(r.poster) + '">' : '<div class="still noimg">NO SIGNAL</div>') + '</a>' +
+        '<div class="body">' +
+        '<div class="code">' + (isTv ? 'S' + String(r.season || 1).padStart(2, '0') + 'E' + String(r.episode || 1).padStart(2, '0') : 'FEATURE') + '</div>' +
+        '<div class="name">' + J.esc(label) + '</div>' +
+        '<div class="hist-bar"><i style="width:' + pct + '%"></i></div>' +
+        '<div class="air">' + J.fmtTime(r.seconds) + ' / ' + J.fmtTime(r.duration) + ' · ' + pct + '% · ' + J.fmtDate(new Date(r.updatedAt).toISOString()) + '</div>' +
+        '</div>' +
+        '<div class="hist-actions">' +
+        '<a class="btn small" href="' + J.esc(href + '?resume=1') + '">▶ RESUME</a>' +
+        '<button class="btn ghost small" data-del="' + J.esc(r.key) + '">✕</button>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  $('#hist-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-del]');
+    if (!btn) return;
+    const key = btn.getAttribute('data-del');
+    const parts = key.split(':'); // mediaType:tmdbId[:season:episode]
+    const qs = new URLSearchParams({ mediaType: parts[0], tmdbId: parts[1] });
+    if (parts.length === 4) { qs.set('season', parts[2]); qs.set('episode', parts[3]); }
+    J.delJSON('/api/history?' + qs).then(load);
+  });
+
+  $('#hist-clear').addEventListener('click', () => {
+    J.getJSON('/api/history').then(d => Promise.all((d.items || []).map(r => {
+      const parts = r.key.split(':');
+      const qs = new URLSearchParams({ mediaType: parts[0], tmdbId: parts[1] });
+      if (parts.length === 4) { qs.set('season', parts[2]); qs.set('episode', parts[3]); }
+      return J.delJSON('/api/history?' + qs);
+    }))).then(load);
+  });
+})();
+</script>
+</body>
+</html>

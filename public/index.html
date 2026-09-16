@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J.A.R.V.I.S. — Streaming Interface</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="home">
+<div class="wrap">
+
+  <section id="hero" class="brackets">
+    <div class="bg" id="hero-bg"></div>
+    <div class="fade"></div>
+    <div class="content" id="hero-content">
+      <div class="kicker">Featured Transmission</div>
+      <h1 id="hero-title">Establishing uplink…</h1>
+      <div class="meta" id="hero-meta"></div>
+      <p class="overview" id="hero-overview"></p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap" id="hero-actions"></div>
+    </div>
+  </section>
+
+  <section id="continue-sec" hidden>
+    <div class="section-head"><h2>Continue Watching</h2><span class="sub" id="continue-sub"></span></div>
+    <div class="row" id="continue-row"></div>
+  </section>
+
+  <section id="trend-sec">
+    <div class="section-head"><h2>Trending Now</h2><span class="sub">24h transmission window</span>
+      <span class="spacer"></span><a href="/hot">FULL SPECTRUM →</a></div>
+    <div class="row" id="trend-row"></div>
+  </section>
+
+  <section id="popular-sec">
+    <div class="section-head"><h2>Popular Films</h2><span class="sub">highest signal films</span>
+      <span class="spacer"></span><a href="/movies">ALL FILMS →</a></div>
+    <div class="row" id="movies-row"></div>
+  </section>
+
+  <section id="tv-sec">
+    <div class="section-head"><h2>Popular Series</h2><span class="sub">serialized signals</span>
+      <span class="spacer"></span><a href="/series">ALL SERIES →</a></div>
+    <div class="row" id="tv-row"></div>
+  </section>
+
+  <section id="top-sec">
+    <div class="section-head"><h2>Acclaimed</h2><span class="sub">top-rated archive entries</span></div>
+    <div class="row" id="top-row"></div>
+  </section>
+
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+
+  J.runBoot([
+    { label: 'Initiating boot sequence', run: () => {} },
+    { label: 'Arc reactor', run: () => 'STABLE', cls: 'ok' },
+    { label: 'TMDB uplink', run: async () => { const g = await fetch('/api/genres?mediaType=movie').then(r => r.json()); return g.genres.length + ' GENRES INDEXED'; } },
+    { label: 'VaPlayer delivery grid', run: async () => { const h = await fetch('/api/health').then(r => r.json()); return h.vidapiDegraded ? 'DEGRADED' : 'ONLINE'; }, cls: 'ok' },
+    { label: 'Loading interface', run: () => {} }
+  ]).then(() => {
+    J.buildShell();
+    J.footer();
+    loadHero();
+    loadContinue();
+    loadRow('/api/trending?mediaType=all&window=day', 'trend-row', true);
+    loadRow('/api/list?mediaType=movie&sortBy=popularity.desc', 'movies-row', true);
+    loadRow('/api/list?mediaType=tv&sortBy=popularity.desc', 'tv-row', true);
+    loadRow('/api/top?mediaType=movie', 'top-row', true);
+  });
+
+  async function loadHero() {
+    try {
+      const data = await J.getJSON('/api/trending?mediaType=all&window=week');
+      const pick = data.items.find(i => i.backdrop && i.overview) || data.items[0];
+      if (!pick) return;
+      $('#hero-bg').style.backgroundImage = 'url("' + pick.backdrop + '")';
+      $('#hero-title').textContent = pick.title;
+      $('#hero-meta').innerHTML =
+        '<span class="rating">★ ' + (pick.rating != null ? pick.rating : '—') + '</span>' +
+        '<span>' + (pick.year || '—') + '</span>' +
+        '<span class="chip">' + (pick.mediaType === 'tv' ? 'SERIES' : 'FILM') + '</span>';
+      $('#hero-overview').textContent = pick.overview || '';
+      $('#hero-actions').innerHTML =
+        '<a class="btn primary" href="' + J.watchHref(pick) + '">▶ TRANSMIT</a>' +
+        '<a class="btn ghost" href="/title/' + pick.mediaType + '/' + pick.id + '">DOSSIER</a>';
+    } catch (e) {
+      $('#hero-title').textContent = 'Signal temporarily unavailable';
+    }
+  }
+
+  async function loadContinue() {
+    try {
+      const h = await J.getJSON('/api/history');
+      const items = (h.items || []).filter(i => i.pct != null && i.pct > 1 && i.pct < 97).slice(0, 12);
+      if (!items.length) return;
+      $('#continue-sec').hidden = false;
+      $('#continue-sub').textContent = items.length + ' IN PROGRESS';
+      $('#continue-row').innerHTML = items.map(r => J.posterCard({
+        id: r.tmdbId, tmdbId: r.tmdbId, mediaType: r.mediaType,
+        title: r.title || 'Untitled', year: null, rating: null,
+        poster: r.poster, pct: r.pct,
+        season: r.season, episode: r.episode
+      }, { showBadge: true, href: r.mediaType === 'tv' && r.season ? '/watch/tv/' + r.tmdbId + '/' + r.season + '/' + r.episode : '/watch/movie/' + r.tmdbId })).join('');
+    } catch (e) { /* stay hidden */ }
+  }
+
+  async function loadRow(url, rowId, badge) {
+    const row = $('#' + rowId);
+    row.innerHTML = J.stateHTML('x').replace('id="x"', '');
+    try {
+      const data = await J.getJSON(url);
+      row.innerHTML = data.items.length
+        ? data.items.map(i => J.posterCard(i, { showBadge: badge })).join('')
+        : '<div class="state warn">NO SIGNALS FOUND</div>';
+    } catch (e) {
+      row.innerHTML = '<div class="state error">UPLINK ERROR — ' + J.esc(e.message) + '</div>';
+    }
+  }
+})();
+</script>
+</body>
+</html>

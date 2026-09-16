@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archive Search — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="search">
+<div class="wrap">
+  <section>
+    <div class="section-head"><h2>Archive Query</h2><span class="sub" id="search-sub"></span></div>
+    <div class="search-row">
+      <input id="q" type="text" placeholder="Enter designation, title fragment, or tt-number…" autocomplete="off" autofocus>
+      <button class="btn" id="q-go">SCAN</button>
+    </div>
+    <div class="grid" id="results"></div>
+    <div class="load-more-row"><button class="btn" id="more" hidden>LOAD MORE</button></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  let page = 1, query = '', busy = false;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' }
+  ]).then(() => { J.buildShell(); J.footer(); wire(); });
+
+  function wire() {
+    const doSearch = () => {
+      query = $('#q').value.trim();
+      if (!query) return;
+      history.replaceState(null, '', '/search?q=' + encodeURIComponent(query));
+      page = 1;
+      $('#results').innerHTML = '';
+      run();
+    };
+    $('#q-go').addEventListener('click', doSearch);
+    $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+    $('#more').addEventListener('click', () => { page++; run(); });
+
+    const initial = new URLSearchParams(location.search).get('q');
+    if (initial) { $('#q').value = initial; query = initial; run(); }
+  }
+
+  async function run() {
+    if (busy) return;
+    busy = true;
+    $('#more').disabled = true;
+    $('#more').textContent = 'SCANNING…';
+    $('#search-sub').textContent = 'QUERYING ARCHIVE FOR “' + query + '”…';
+
+    const ttMatch = /^tt\d+$/i.exec(query);
+
+    try {
+      if (ttMatch) {
+        // Direct IMDB lookup — resolve and jump straight to the dossier.
+        const found = await J.getJSON('/api/find?imdb=' + encodeURIComponent(query));
+        location.href = '/title/' + found.mediaType + '/' + found.tmdbId;
+        return;
+      }
+
+      const data = await J.getJSON('/api/search?mediaType=multi&q=' + encodeURIComponent(query) + '&page=' + page);
+      $('#search-sub').textContent = (data.total || 0).toLocaleString() + ' MATCHES · PAGE ' + data.page;
+      if (page === 1 && !data.items.length) {
+        $('#results').innerHTML = '<div class="blocker small"><h3>NO MATCHES</h3><p>The archive holds no record of “' + J.esc(query) + '”.</p></div>';
+      }
+      $('#results').insertAdjacentHTML('beforeend', data.items.map(i => J.posterCard(i, { showBadge: true })).join(''));
+      $('#more').hidden = page >= data.totalPages;
+      $('#more').textContent = 'LOAD MORE';
+      $('#more').disabled = false;
+    } catch (e) {
+      $('#results').innerHTML = '<div class="blocker small"><h3>QUERY FAILED</h3><p>' + J.esc(e.message) + '</p></div>';
+    } finally {
+      busy = false;
+    }
+  }
+})();
+</script>
+</body>
+</html>

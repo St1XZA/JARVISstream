@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hot — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="hot">
+<div class="wrap">
+  <section>
+    <div class="section-head"><h2>Thermal Signature — Trending Now</h2><span class="sub" id="hot-sub"></span></div>
+    <div class="chips" id="hot-filters">
+      <button class="chip-btn active" data-w="day" data-mt="all">TODAY · ALL</button>
+      <button class="chip-btn" data-w="day" data-mt="movie">TODAY · FILMS</button>
+      <button class="chip-btn" data-w="day" data-mt="tv">TODAY · SERIES</button>
+      <button class="chip-btn" data-w="week" data-mt="all">THIS WEEK · ALL</button>
+      <button class="chip-btn" data-w="week" data-mt="movie">WEEK · FILMS</button>
+      <button class="chip-btn" data-w="week" data-mt="tv">WEEK · SERIES</button>
+    </div>
+    <div id="hot-hero"></div>
+    <div class="grid" id="hot-grid"></div>
+    <div class="load-more-row"><button class="btn" id="hot-more">LOAD MORE</button></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  let page = 1, win = 'day', mt = 'all', firstLoad = true;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' },
+    { label: 'Trending feed', run: () => J.getJSON('/api/health').then(() => 'OK') }
+  ]).then(() => { J.buildShell(); J.footer(); load(true); });
+
+  function load(reset) {
+    if (reset) { page = 1; $('#hot-grid').innerHTML = ''; $('#hot-hero').innerHTML = ''; }
+    $('#hot-more').disabled = true;
+    $('#hot-more').textContent = 'SCANNING…';
+    J.getJSON('/api/trending?mediaType=' + mt + '&window=' + win + '&page=' + page)
+      .then(data => {
+        if (page === 1 && data.items.length) renderHero(data.items[0]);
+        $('#hot-grid').insertAdjacentHTML('beforeend', data.items.map(i => J.posterCard(i, { showBadge: mt === 'all' })).join(''));
+        $('#hot-sub').textContent = (data.total || 0).toLocaleString() + ' ITEMS RISING';
+        $('#hot-more').disabled = page >= data.totalPages;
+        $('#hot-more').textContent = page >= data.totalPages ? 'END OF FEED' : 'LOAD MORE';
+        page++;
+        firstLoad = false;
+      })
+      .catch(e => {
+        $('#hot-grid').innerHTML = '<div class="blocker small"><h3>SCAN FAILED</h3><p>' + J.esc(e.message) + '</p></div>';
+        $('#hot-more').textContent = 'RETRY';
+        $('#hot-more').disabled = false;
+      });
+  }
+
+  function renderHero(item) {
+    $('#hot-hero').innerHTML =
+      '<div class="hero brackets" style="background-image:linear-gradient(90deg,rgba(4,7,15,.92) 30%,rgba(4,7,15,.35)),url(' + J.esc(item.backdrop || '') + ')">' +
+      '<div class="hero-body">' +
+      '<div class="hero-kicker">№1 THERMAL SIGNATURE · ' + (item.mediaType === 'tv' ? 'SERIES' : 'FILM') + '</div>' +
+      '<h1>' + J.esc(item.title) + '</h1>' +
+      '<div class="hero-meta"><span>' + J.esc(item.year || '—') + '</span><span class="r">★ ' + J.esc(item.rating != null ? item.rating : '—') + '</span></div>' +
+      '<p class="hero-overview">' + J.esc((item.overview || '').slice(0, 260)) + '…</p>' +
+      '<div class="hero-actions"><a class="btn" href="' + J.esc(J.watchHref(item)) + '">▶ TRANSMIT</a>' +
+      '<a class="btn ghost" href="/title/' + item.mediaType + '/' + item.id + '">DOSSIER</a></div>' +
+      '</div></div>';
+  }
+
+  $('#hot-filters').addEventListener('click', (e) => {
+    const b = e.target.closest('.chip-btn');
+    if (!b) return;
+    $$('#hot-filters .chip-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    win = b.dataset.w; mt = b.dataset.mt;
+    load(true);
+  });
+  $('#hot-more').addEventListener('click', () => load(false));
+})();
+</script>
+</body>
+</html>

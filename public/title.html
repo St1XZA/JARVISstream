@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dossier — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="title">
+<div class="wrap" id="app"></div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  const $$ = J.$$;
+  const parts = location.pathname.split('/'); // /title/movie/123
+  const mt = parts[2] === 'tv' ? 'tv' : 'movie';
+  const id = parts[3];
+  let detail = null;
+  let seasonNo = 1;
+
+  J.runBoot([
+    { label: 'Retrieving dossier', run: () => 'OK' },
+    { label: 'Interface ready', run: () => {} }
+  ]).then(() => { J.buildShell(); J.footer(); load(); });
+
+  async function load() {
+    $('#app').innerHTML = J.stateHTML('app-state');
+    try {
+      detail = await J.getJSON('/api/title/' + mt + '/' + id);
+      document.title = detail.title + ' — J.A.R.V.I.S.';
+      render();
+      if (mt === 'tv' && detail.seasons.length) {
+        $('#season-tabs').innerHTML = detail.seasons.map(s =>
+          '<button class="season-tab" data-s="' + s.seasonNumber + '">S' + String(s.seasonNumber).padStart(2, '0') + '</button>').join('');
+        loadSeason(detail.seasons[0].seasonNumber || 1);
+      }
+    } catch (e) {
+      $('#app').innerHTML = '<div class="state error">DOSSIER NOT FOUND — ' + J.esc(e.message) + '</div>';
+    }
+  }
+
+  function playHref(season, episode) {
+    return mt === 'tv'
+      ? '/watch/tv/' + id + '/' + season + '/' + episode
+      : '/watch/movie/' + id;
+  }
+
+  function genreHref(g) { return (mt === 'tv' ? '/series?genre=' : '/movies?genre=') + g.id; }
+
+  function render() {
+    const d = detail;
+    const nu = d.nextUp;
+    const resumeLabel = nu ? '▶ RESUME S' + nu.season + 'E' + nu.episode : (mt === 'tv' ? '▶ PLAY S1E1' : '▶ PLAY');
+
+    $('#app').innerHTML =
+      '<section class="title-hero brackets">' +
+      '<div class="bg" style="background-image:url(' + J.esc(d.backdrop || d.poster || '') + ')"></div>' +
+      '<div class="fade"></div>' +
+      '<div class="content">' +
+      '<div class="poster-box">' + (d.poster ? '<img src="' + J.esc(d.poster) + '" alt="">' : '<div class="noimg">NO SIGNAL</div>') + '</div>' +
+      '<div style="min-width:0;flex:1">' +
+      '<h1>' + J.esc(d.title) + '</h1>' +
+      (d.tagline ? '<div class="tagline">“' + J.esc(d.tagline) + '”</div>' : '') +
+      '<div class="meta">' +
+      '<span class="chip">' + (mt === 'tv' ? 'SERIES' : 'FILM') + '</span>' +
+      (d.year ? '<span>' + d.year + '</span>' : '') +
+      (d.rating != null ? '<span class="chip amber">★ ' + d.rating + '</span>' : '') +
+      (d.runtime ? '<span>' + d.runtime + ' MIN</span>' : '') +
+      (d.seasons && d.seasons.length ? '<span>' + d.seasons.length + ' SEASONS</span>' : '') +
+      (d.status ? '<span>' + J.esc(d.status.toUpperCase()) + '</span>' : '') +
+      (d.imdbId ? '<span>IMDB ' + J.esc(d.imdbId) + '</span>' : '<span>TMDB ' + d.tmdbId + '</span>') +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 10px">' +
+      (d.genres || []).map(g => '<a class="chip chip-link" href="' + genreHref(g) + '" title="Browse ' + J.esc(g.name) + ' in the archive">' + J.esc(g.name) + '</a>').join('') +
+      '</div>' +
+      '<p class="overview">' + J.esc(d.overview) + '</p>' +
+      '<div class="actions">' +
+      '<a class="btn primary" href="' + playHref(nu ? nu.season : 1, nu ? nu.episode : 1) + '">' +
+      (nu && nu.seconds > 5 ? resumeLabel + ' · ' + J.fmtTime(nu.seconds) : resumeLabel) + '</a>' +
+      '<button class="btn ghost" id="wl-btn">' + (d.inWatchlist ? '✓ IN WATCHLIST' : '+ WATCHLIST') + '</button>' +
+      (d.trailerKey ? '<a class="btn ghost" target="_blank" rel="noopener" href="https://www.youtube.com/watch?v=' + J.esc(d.trailerKey) + '">TRAILER ↗</a>' : '') +
+      '</div>' +
+      '</div></div></section>' +
+
+      (d.cast && d.cast.length ?
+      '<section><div class="section-head"><h2>Personnel</h2><span class="sub">principal cast</span></div>' +
+      '<div class="cast-row">' + d.cast.map(c =>
+        '<div class="cast-card">' +
+        (c.profile ? '<img src="' + J.esc(c.profile) + '" alt="">' : '<div style="width:96px;height:96px;border-radius:50%;border:1px solid var(--line)"></div>') +
+        '<div class="n">' + J.esc(c.name) + '</div><div class="c">' + J.esc(c.character || '') + '</div></div>').join('') +
+      '</div></section>' : '') +
+
+      (mt === 'tv' ?
+      '<section><div class="section-head"><h2>Episodes</h2><span class="sub" id="ep-sub">select season</span></div>' +
+      '<div class="season-info"><img id="season-poster" alt="" hidden><p id="season-desc"></p></div>' +
+      '<div class="season-tabs" id="season-tabs"></div>' +
+      '<div id="ep-list"></div></section>' : '') +
+
+      '<section><div class="section-head"><h2>Related Signals</h2><span class="sub">similar archive entries</span></div>' +
+      '<div class="row" id="sim-row"></div></section>';
+
+    $('#wl-btn').addEventListener('click', toggleWatchlist);
+    J.getJSON('/api/similar/' + mt + '/' + id).then(data => {
+      $('#sim-row').innerHTML = data.items.map(i => J.posterCard(i, { showBadge: true })).join('');
+    }).catch(() => { $('#sim-row').innerHTML = ''; });
+  }
+
+  async function loadSeason(sn) {
+    seasonNo = sn;
+    $$('#season-tabs .season-tab').forEach(b => b.classList.toggle('active', Number(b.dataset.s) === sn));
+    $('#ep-list').innerHTML = J.stateHTML('eps');
+    try {
+      const data = await J.getJSON('/api/season/' + id + '/' + sn);
+      $('#ep-sub').textContent = (data.name || 'Season ' + sn) + ' — ' + data.episodes.length + ' EPISODES' +
+        (data.airYear ? ' · ' + data.airYear : '');
+      $('#season-desc').textContent = data.overview || '';
+      const sp = $('#season-poster');
+      if (data.poster) { sp.src = data.poster; sp.hidden = false; } else { sp.hidden = true; }
+      const watchedKeys = new Set((data.watched || []).filter(w => w.season === sn).map(w => w.episode));
+      $('#ep-list').innerHTML = data.episodes.map(e => {
+        const w = (data.watched || []).find(x => x.season === sn && x.episode === e.episodeNumber);
+        const pct = w && w.pct != null ? Math.min(100, w.pct) : null;
+        const cls = 'ep-row' + (pct != null && pct > 90 ? ' watched' : '') +
+          (detail.nextUp && detail.nextUp.season === sn && detail.nextUp.episode === e.episodeNumber ? ' current' : '');
+        return '<a class="' + cls + '" href="/watch/tv/' + id + '/' + sn + '/' + e.episodeNumber + '" style="text-decoration:none;color:inherit;display:flex">' +
+          '<img class="still" loading="lazy" src="' + J.esc(e.still || '') + '" onerror="this.style.visibility=\'hidden\'">' +
+          '<div class="body"><div class="code">S' + String(sn).padStart(2, '0') + 'E' + String(e.episodeNumber).padStart(2, '0') + ' · ' + J.fmtDate(e.airDate) +
+          (e.rating != null ? ' · <span class="ep-rating">★ ' + e.rating + '</span>' : '') +
+          (e.runtime ? ' · ' + e.runtime + ' MIN' : '') + '</div>' +
+          '<div class="name">' + J.esc(e.name) + '</div>' +
+          '<div class="ov">' + J.esc(e.overview || 'No transmission data.') + '</div>' +
+          (e.guestStars && e.guestStars.length ? '<div class="guests">GUEST: ' + J.esc(e.guestStars.join(', ')) + '</div>' : '') +
+          '</div>' +
+          '<div class="right">' + (e.runtime ? e.runtime + ' MIN' : '') +
+          (pct != null ? '<div class="seen">' + (pct > 90 ? '✓ VIEWED' : pct + '%') + '</div><div class="pbar"><i style="width:' + pct + '%"></i></div>' : '') +
+          '</div></a>';
+      }).join('');
+    } catch (e) {
+      $('#ep-list').innerHTML = '<div class="state error">SEASON DATA ERROR</div>';
+    }
+  }
+
+  async function toggleWatchlist() {
+    const btn = $('#wl-btn');
+    try {
+      if (detail.inWatchlist) {
+        await J.delJSON('/api/watchlist?mediaType=' + mt + '&tmdbId=' + id);
+        detail.inWatchlist = false;
+        btn.textContent = '+ WATCHLIST';
+      } else {
+        await J.postJSON('/api/watchlist', { mediaType: mt, tmdbId: Number(id), title: detail.title, poster: detail.poster, year: detail.year, rating: detail.rating });
+        detail.inWatchlist = true;
+        btn.textContent = '✓ IN WATCHLIST';
+      }
+    } catch (e) { /* noop */ }
+  }
+
+  // delegate season tab clicks (tabs rendered after load)
+  document.addEventListener('click', (e) => {
+    const tab = e.target.closest('.season-tab');
+    if (tab) loadSeason(Number(tab.dataset.s));
+  });
+})();
+</script>
+</body>
+</html>

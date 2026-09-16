@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Episodes — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="episodes">
+<div class="wrap">
+  <section>
+    <div class="section-head"><h2>Live Episode Feed</h2><span class="sub" id="eps-sub"></span></div>
+    <div id="eps-grid"></div>
+    <div class="load-more-row"><button class="btn" id="eps-more">LOAD MORE</button></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  let page = 1;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' },
+    { label: 'Episode feed', run: () => J.getJSON('/api/health').then(() => 'OK') }
+  ]).then(() => { J.buildShell(); J.footer(); load(); });
+
+  function load() {
+    $('#eps-more').disabled = true;
+    $('#eps-more').textContent = 'SCANNING…';
+    J.getJSON('/api/vidapi/latest/episodes?page=' + page)
+      .then(payload => {
+        const items = payload.data.items || [];
+        render(items, payload);
+        page++;
+      })
+      .catch(e => renderFail(e));
+  }
+
+  function render(items, payload) {
+    if (payload.source === 'tmdb-fallback') {
+      // TMDB fallback returns shows, not episodes — reframe the feed.
+      $('#eps-sub').textContent = 'VIDAPI FEED UNREACHABLE — SHOWING NEWLY AIRED SERIES (TMDB FALLBACK)';
+      $('#eps-grid').classList.add('grid');
+      $('#eps-grid').insertAdjacentHTML('beforeend', items.map(i => J.posterCard(Object.assign({ mediaType: 'tv' }, i), {})).join(''));
+    } else {
+      $('#eps-sub').textContent = (payload.data.total || 0).toLocaleString() + ' EPISODES IN FEED';
+      $('#eps-grid').classList.add('eps-grid');
+      $('#eps-grid').insertAdjacentHTML('beforeend', items.map(epCard).join(''));
+    }
+    $('#eps-more').disabled = page >= payload.data.totalPages;
+    $('#eps-more').textContent = page >= payload.data.totalPages ? 'END OF FEED' : 'LOAD MORE';
+  }
+
+  function epCard(ep) {
+    // Catalog episodes key on IMDB ids; resolve to a TMDB watch link lazily via /api/find.
+    const href = '/watch/tv/' + (ep.tmdbId || ep.imdbId || '') + '/' + (ep.season || 1) + '/' + (ep.episode || 1);
+    return '<a class="ep-row" href="' + J.esc(href) + '">' +
+      '<img class="still" loading="lazy" src="' + J.esc(ep.poster || '') + '" onerror="this.style.visibility=\'hidden\'">' +
+      '<div class="body"><div class="code">S' + String(ep.season || 1).padStart(2, '0') + 'E' + String(ep.episode || 1).padStart(2, '0') + '</div>' +
+      '<div class="name">' + J.esc(ep.title) + '</div>' +
+      '<div class="air">' + J.esc(ep.airDate || '') + '</div></div>' +
+      '<span class="badge tv">EPISODE</span></a>';
+  }
+
+  function renderFail(e) {
+    $('#eps-grid').innerHTML = '<div class="blocker small"><h3>FEED OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
+    $('#eps-more').textContent = 'RETRY';
+    $('#eps-more').disabled = false;
+  }
+
+  $('#eps-more').addEventListener('click', load);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catalog Sync — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="catalog">
+<div class="wrap">
+  <section>
+    <div class="section-head"><h2>VidAPI Library Diagnostics</h2><span class="sub" id="cat-sub"></span></div>
+    <div class="stats-row" id="cat-stats"><div class="state">SCANNING<span class="bar"><i></i></span></div></div>
+    <div id="cat-note"></div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Fresh From The Catalog</h2>
+      <div class="chips" id="cat-filters" style="margin-left:auto">
+        <button class="chip-btn active" data-src="movies">FILMS</button>
+        <button class="chip-btn" data-src="tvshows">SERIES</button>
+      </div>
+    </div>
+    <div class="grid" id="cat-grid"></div>
+    <div class="load-more-row"><button class="btn" id="cat-more">LOAD MORE</button></div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>ID Manifests</h2><span class="sub">daily-updated supported-ID dumps</span></div>
+    <div class="stats-row" id="idlists"><div class="state">SCANNING<span class="bar"><i></i></span></div></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  let src = 'movies', page = 1;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' },
+    { label: 'Catalog uplink', run: () => J.getJSON('/api/health').then(() => 'OK') }
+  ]).then(() => { J.buildShell(); J.footer(); loadStats(); loadIdLists(); loadFeed(true); });
+
+  // ------------------------------------------------------------- stats ---
+  function loadStats() {
+    J.getJSON('/api/vidapi/stats')
+      .then(p => {
+        if (!p.ok) return renderStatsFail(p);
+        const s = p.stats || {};
+        const lib = s.content_library || s.imdb || s;
+        const cells = [
+          ['MOVIES', lib.movies || lib.movie_count],
+          ['SERIES', lib.tv_series || lib.series_count || lib.shows],
+          ['EPISODES', lib.episodes || lib.episode_count],
+          ['PEOPLE', lib.people || lib.person_count],
+          ['RATINGS', lib.ratings || lib.rating_count],
+          ['COLLECTIONS', lib.collections || lib.collection_count]
+        ];
+        $('#cat-stats').innerHTML = cells.map(([k, v]) =>
+          '<div class="stat-cell"><div class="v">' + (v != null ? J.fmtNum(v) : '—') + '</div><div class="k">' + k + '</div></div>'
+        ).join('');
+        $('#cat-note').innerHTML = p.stats && p.stats.generated_at
+          ? '<p class="dim-note">Snapshot generated ' + J.esc(p.stats.generated_at) + '</p>' : '';
+        $('#cat-sub').textContent = 'UPLINK NOMINAL';
+      })
+      .catch(() => renderStatsFail({ error: 'uplink failed' }));
+  }
+
+  function renderStatsFail(p) {
+    $('#cat-stats').innerHTML = '';
+    $('#cat-sub').textContent = 'UPLINK DEGRADED';
+    $('#cat-note').innerHTML = '<div class="blocker small"><h3>CATALOG HOST UNREACHABLE</h3><p>' +
+      J.esc(p.error || 'unknown') + '</p><p class="dim-note">' +
+      'Vaplayer.ru is not responding from this network (blocked, offline, or your domain is not whitelisted yet). ' +
+      'Discovery pages keep running on TMDB metadata. Once whitelisting is approved, this panel lights up automatically.</p></div>';
+  }
+
+  // -------------------------------------------------------------- feed ---
+  function loadFeed(reset) {
+    if (reset) { page = 1; $('#cat-grid').innerHTML = ''; }
+    $('#cat-more').disabled = true;
+    $('#cat-more').textContent = 'SCANNING…';
+    J.getJSON('/api/vidapi/latest/' + src + '?page=' + page)
+      .then(payload => {
+        const items = payload.data.items || [];
+        if (payload.source === 'tmdb-fallback') {
+          $('#cat-grid').insertAdjacentHTML('beforeend', items.map(i => J.posterCard(i, {})).join(''));
+        } else {
+          $('#cat-grid').insertAdjacentHTML('beforeend', items.map(catalogCard).join(''));
+        }
+        $('#cat-more').disabled = page >= payload.data.totalPages;
+        $('#cat-more').textContent = page >= payload.data.totalPages ? 'END OF FEED' : 'LOAD MORE';
+        page++;
+      })
+      .catch(e => {
+        $('#cat-grid').innerHTML = '<div class="blocker small"><h3>FEED FAILED</h3><p>' + J.esc(e.message) + '</p></div>';
+        $('#cat-more').textContent = 'RETRY';
+        $('#cat-more').disabled = false;
+      });
+  }
+
+  function catalogCard(it) {
+    const mt = it.mediaType === 'tv' ? 'tv' : 'movie';
+    const watch = mt === 'tv'
+      ? '/watch/tv/' + (it.tmdbId || it.imdbId) + '/' + (it.season || 1) + '/' + (it.episode || 1)
+      : '/watch/movie/' + (it.tmdbId || it.imdbId);
+    return '<a class="card brackets" href="' + J.esc(watch) + '">' +
+      '<span class="badge' + (mt === 'tv' ? ' tv' : '') + '">' + (mt === 'tv' ? 'SERIES' : 'FILM') + '</span>' +
+      (it.poster ? '<img class="poster" loading="lazy" src="' + J.esc(it.poster) + '">' : '<div class="noimg">NO SIGNAL</div>') +
+      '<div class="info"><div class="t">' + J.esc(it.title) + '</div>' +
+      '<div class="m"><span>' + J.esc(it.year || '—') + '</span><span class="r">★ ' + J.esc(it.rating != null ? it.rating : '—') + '</span></div></div></a>';
+  }
+
+  // ----------------------------------------------------------- idlists ---
+  function loadIdLists() {
+    J.getJSON('/api/vidapi/idlists')
+      .then(d => Promise.all(d.lists.map(name =>
+        J.getJSON('/api/vidapi/ids/' + encodeURIComponent(name))
+          .then(r => ({ name, r }))
+          .catch(() => ({ name, r: { ok: false } }))
+      )))
+      .then(results => {
+        $('#idlists').innerHTML = results.map(({ name, r }) =>
+          '<div class="stat-cell"><div class="v">' + (r.ok ? J.fmtNum(r.list.totalLines) : '—') + '</div>' +
+          '<div class="k">' + J.esc(name) + '</div></div>'
+        ).join('');
+      })
+      .catch(() => {
+        $('#idlists').innerHTML = '<div class="stat-cell"><div class="v">—</div><div class="k">MANIFESTS OFFLINE</div></div>';
+      });
+  }
+
+  $('#cat-filters').addEventListener('click', (e) => {
+    const b = e.target.closest('.chip-btn');
+    if (!b) return;
+    $$('#cat-filters .chip-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    src = b.dataset.src;
+    loadFeed(true);
+  });
+  $('#cat-more').addEventListener('click', () => loadFeed(false));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Films — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="browse">
+<div class="wrap">
+  <section>
+    <div class="section-head">
+      <h2 id="browse-title">Film Archive</h2>
+      <span class="sub" id="browse-sub"></span>
+      <select id="sort" class="btn ghost small" style="margin-left:auto">
+        <option value="popularity.desc">MOST POPULAR</option>
+        <option value="vote_average.desc">TOP RATED</option>
+        <option value="primary_release_date.desc">NEWEST</option>
+        <option value="revenue.desc">BOX OFFICE</option>
+      </select>
+    </div>
+    <div class="chips" id="genre-chips"></div>
+    <div class="grid" id="browse-grid"><div class="state">CALIBRATING<span class="bar"><i></i></span></div></div>
+    <div class="load-more-row"><button class="btn" id="more">LOAD MORE</button></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  const isTv = location.pathname === '/series';
+  const preGenre = new URLSearchParams(location.search).get('genre') || '';
+  let genre = preGenre, page = 1;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' },
+    { label: 'Genre index', run: () => J.getJSON('/api/genres?mediaType=' + (isTv ? 'tv' : 'movie')) }
+  ]).then(init);
+
+  function init() {
+    J.buildShell();
+    J.footer();
+    document.title = (isTv ? 'Series' : 'Films') + ' — J.A.R.V.I.S.';
+    $('#browse-title').textContent = isTv ? 'Series Archive' : 'Film Archive';
+    if (isTv) {
+      const newest = $('#sort').querySelector('option[value="primary_release_date.desc"]');
+      if (newest) newest.value = 'first_air_date.desc';
+      const rev = $('#sort').querySelector('option[value="revenue.desc"]');
+      if (rev) { rev.value = 'vote_count.desc'; rev.textContent = 'MOST VOTED'; }
+    }
+
+    J.getJSON('/api/genres?mediaType=' + (isTv ? 'tv' : 'movie')).then(d => {
+      $('#genre-chips').innerHTML =
+        '<button class="chip-btn' + (preGenre ? '' : ' active') + '" data-g="">ALL GENRES</button>' +
+        d.genres.map(g => '<button class="chip-btn' + (preGenre === String(g.id) ? ' active' : '') + '" data-g="' + g.id + '">' + J.esc(g.name).toUpperCase() + '</button>').join('');
+    });
+
+    load(true);
+  }
+
+  function load(reset) {
+    if (reset) { page = 1; $('#browse-grid').innerHTML = ''; }
+    $('#more').disabled = true;
+    $('#more').textContent = 'SCANNING…';
+    const qs = new URLSearchParams({
+      mediaType: isTv ? 'tv' : 'movie',
+      page: String(page),
+      sortBy: $('#sort').value
+    });
+    if (genre) qs.set('genre', genre);
+    J.getJSON('/api/list?' + qs)
+      .then(data => {
+        if (page === 1) $('#browse-grid').innerHTML = '';
+        $('#browse-grid').insertAdjacentHTML('beforeend', data.items.map(i => J.posterCard(i, {})).join(''));
+        $('#browse-sub').textContent = (data.total || 0).toLocaleString() + ' ITEMS';
+        $('#more').disabled = page >= data.totalPages;
+        $('#more').textContent = page >= data.totalPages ? 'END OF ARCHIVE' : 'LOAD MORE';
+        page++;
+      })
+      .catch(e => {
+        $('#browse-grid').innerHTML = '<div class="blocker small"><h3>ARCHIVE OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
+        $('#more').textContent = 'RETRY';
+        $('#more').disabled = false;
+      });
+  }
+
+  $('#genre-chips').addEventListener('click', (e) => {
+    const b = e.target.closest('.chip-btn');
+    if (!b) return;
+    $$('#genre-chips .chip-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    genre = b.dataset.g;
+    load(true);
+  });
+  $('#sort').addEventListener('change', () => load(true));
+  $('#more').addEventListener('click', () => load(false));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transmission — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body data-page="watch">
+<div class="wrap">
+  <div class="watch-side">
+    <div>
+      <div id="watch-stage"><div class="state">ESTABLISHING TRANSMISSION<span class="bar"><i></i></span></div></div>
+      <div class="watch-meta" id="watch-meta"></div>
+    </div>
+    <aside>
+      <div class="sub-panel now-playing" id="now-playing">
+        <h4>Now Playing</h4>
+        <div class="np-body"><div class="state">RESOLVING<span class="bar"><i></i></span></div></div>
+      </div>
+
+      <div class="sub-panel" id="sub-panel" hidden>
+        <h4>Subtitle Injection</h4>
+        <input id="sub-url" type="url" placeholder="https://example.com/movie.srt">
+        <div style="display:flex;gap:8px">
+          <input id="sub-lang" placeholder="lang (fr)" style="flex:1">
+          <input id="sub-label" placeholder="label (French)" style="flex:1">
+        </div>
+        <label style="font-family:var(--mono);font-size:10px;color:var(--text-dim);display:flex;gap:8px;align-items:center;margin:4px 0 10px">
+          <input type="checkbox" id="sub-default" checked> default track
+        </label>
+        <button class="btn small" id="sub-apply">APPLY + RELOAD</button>
+      </div>
+
+      <div class="sub-panel" style="margin-top:16px">
+        <h4>Next Episode</h4>
+        <label class="auto-next-row"><input type="checkbox" id="auto-next-toggle"> AUTO-NEXT EPISODE</label>
+        <div id="next-ep" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);line-height:1.7">—</div>
+      </div>
+
+      <div class="sub-panel" style="margin-top:16px">
+        <h4>Embed Inspector</h4>
+        <div id="embed-url" style="font-family:var(--mono);font-size:10px;color:var(--text-faint);word-break:break-all;line-height:1.6">—</div>
+      </div>
+    </aside>
+  </div>
+
+  <section id="queue-sec" hidden>
+    <div class="section-head"><h2>Episode Queue</h2><span class="sub" id="queue-sub"></span></div>
+    <div class="season-tabs" id="watch-season-tabs" hidden></div>
+    <div id="queue-list"></div>
+  </section>
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  const m = location.pathname.match(/^\/watch\/(movie|tv)\/([^/]+)(?:\/(\d+)\/(\d+))?$/);
+  if (!m) { location.href = '/'; return; }
+  let mediaType = m[1];
+  let idParam = m[2];
+  let season = m[3] ? Number(m[3]) : 1;
+  let episode = m[4] ? Number(m[4]) : 1;
+
+  let detail = null;
+  let embedUrl = '';
+  let lastSavedSec = 0;
+  let completed = false;
+  let autoNextTimer = null;
+  let watchdog = null;
+  let gotEvent = false;
+  let lastResume = 0;
+
+  J.runBoot([
+    { label: 'Resolving signal', run: () => 'OK' },
+    { label: 'Player handshake', run: () => {} }
+  ]).then(init);
+
+  async function init() {
+    J.buildShell();
+    J.footer();
+    const tgl = $('#auto-next-toggle');
+    tgl.checked = localStorage.getItem('jarvis.autoNext') !== '0';
+    tgl.addEventListener('change', () => {
+      localStorage.setItem('jarvis.autoNext', tgl.checked ? '1' : '0');
+      logLine('info', 'AUTO-NEXT ' + (tgl.checked ? 'ENABLED' : 'DISABLED'));
+    });
+
+    // Season selector: browse any season's queue without touching the player.
+    $('#watch-season-tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('.season-tab');
+      if (!b) return;
+      loadQueue(Number(b.dataset.s));
+    });
+    // Episode rows: seamless in-place switch instead of a full page reload.
+    $('#queue-list').addEventListener('click', (e) => {
+      const a = e.target.closest('a.ep-row');
+      if (!a) return;
+      const parts = a.getAttribute('href').split('/'); // /watch/tv/{id}/{s}/{e}
+      e.preventDefault();
+      switchEpisode(Number(parts[3]), Number(parts[4]));
+    });
+    try {
+      if (/^tt\d+$/i.test(idParam)) {
+        // IMDB deep link: resolve to TMDB first
+        const found = await J.getJSON('/api/find?imdb=' + encodeURIComponent(idParam));
+        mediaType = found.mediaType;
+        idParam = String(found.tmdbId);
+      }
+      detail = await J.getJSON('/api/title/' + mediaType + '/' + idParam);
+      if (mediaType === 'tv') {
+        const maxS = detail.seasons.length ? detail.seasons[detail.seasons.length - 1].seasonNumber : season;
+        if (season > maxS) { season = maxS; episode = 1; }
+        await loadQueue();
+      }
+      await mountPlayer();
+    } catch (e) {
+      $('#watch-stage').innerHTML =
+        '<div class="blocker"><div class="icon">⚠</div><h3>SIGNAL RESOLUTION FAILED</h3><p>' + J.esc(e.message) + '</p></div>';
+    }
+  }
+
+  // ────────────────────────────────────────────── player mounting ─────
+
+  async function mountPlayer(resumeOverride) {
+    completed = false;
+    gotEvent = false;
+    cancelAutoNext();
+    clearWatchdog();
+    hideStall();
+    const stage = $('#watch-stage');
+    // Crossfade: an existing player stays mounted underneath (dimmed) while the
+    // next episode's iframe loads on top; only the first mount gets a full state.
+    const oldPlayer = stage.querySelector('iframe#player') || stage.querySelector('iframe');
+    const loadingEl = oldPlayer ? null : stage.querySelector('.state');
+    if (!oldPlayer && !loadingEl) stage.innerHTML = J.stateHTML('pst');
+    else if (oldPlayer) oldPlayer.classList.add('fade-dim');
+    let resumeAt = resumeOverride;
+    if (resumeAt == null) {
+      try {
+        const pr = await J.getJSON('/api/progress?mediaType=' + mediaType + '&tmdbId=' + idParam +
+          (mediaType === 'tv' ? '&season=' + season + '&episode=' + episode : ''));
+        resumeAt = pr.rec ? pr.rec.seconds : 0;
+      } catch (e) { resumeAt = 0; }
+    }
+    lastResume = resumeAt || 0;
+
+    const qs = new URLSearchParams({
+      mediaType, tmdbId: idParam,
+      season: String(season), episode: String(episode),
+      resumeAt: String(Math.max(0, resumeAt || 0))
+    });
+    const resp = await J.getJSON('/api/embed-url?' + qs);
+    embedUrl = resp.embedUrl;
+
+    // Fullscreen survival: when the browser is fullscreen ON the player element,
+    // replacing that element would exit fullscreen. So if a player frame already
+    // exists, we REUSE it — swap the src and keep the same node in the DOM.
+    const fsEl = document.fullscreenElement;
+    const reuse = oldPlayer && fsEl && (fsEl === oldPlayer || oldPlayer.contains(fsEl) || fsEl.contains(oldPlayer));
+    let iframe;
+    if (reuse) {
+      iframe = oldPlayer;
+      iframe.classList.remove('fade-dim', 'fade-out', 'pre');
+      iframe.src = embedUrl; // same node → fullscreen persists across the swap
+    } else {
+      iframe = document.createElement('iframe');
+      iframe.id = 'player';
+      iframe.className = 'pre';
+      iframe.src = embedUrl;
+      iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
+      if (oldPlayer) oldPlayer.removeAttribute('id'); // only the new frame owns #player
+      stage.appendChild(iframe);
+    }
+    $('#embed-url').textContent = embedUrl;
+    renderMeta();
+    if (mediaType === 'tv') loadQueue();
+    armWatchdog();
+
+    if (reuse) {
+      // Same-node swap: no crossfade needed — the node just keeps playing.
+      // Progress events resume naturally; the player fires fresh telemetry.
+      lastResume = 0;
+      return;
+    }
+
+    // Reveal the new player once it has content (or after a fallback), then
+    // retire the dimmed old frame — a short crossfade, no hard cut.
+    let revealed = false;
+    const reveal = () => {
+      if (revealed) return;
+      revealed = true;
+      iframe.classList.remove('pre');
+      if (loadingEl) loadingEl.remove();
+      if (oldPlayer) {
+        oldPlayer.classList.remove('fade-dim');
+        oldPlayer.classList.add('fade-out');
+        setTimeout(() => oldPlayer.remove(), 550);
+      }
+    };
+    iframe.addEventListener('load', reveal);
+    setTimeout(reveal, oldPlayer ? 6000 : 2500); // fallback if `load` never fires
+  }
+
+  // ───────────────────────── player watchdog (vaplayer stall) ─────────
+
+  function armWatchdog() {
+    clearWatchdog();
+    watchdog = setTimeout(() => {
+      if (gotEvent) return;
+      logLine('warn', 'NO TELEMETRY — vaplayer.ru not responding');
+      showStall();
+    }, 18000);
+  }
+  function clearWatchdog() { if (watchdog) { clearTimeout(watchdog); watchdog = null; } }
+
+  function showStall() {
+    if ($('#stall-overlay')) return;
+    $('#watch-stage').insertAdjacentHTML('beforeend',
+      '<div class="stall-overlay" id="stall-overlay">' +
+      '<div class="icon">⚠</div><h3>TRANSMISSION STALLED</h3>' +
+      '<p>vaplayer.ru did not respond in time. The host may be down, blocked in your region, or your domain is not whitelisted with VidAPI yet. Discovery pages keep working regardless.</p>' +
+      '<div class="row-btns"><button class="btn" id="stall-retry">RETRY</button>' +
+      '<button class="btn ghost" id="stall-dismiss">DISMISS</button></div></div>');
+    $('#stall-retry').addEventListener('click', () => { hideStall(); mountPlayer(lastResume); });
+    $('#stall-dismiss').addEventListener('click', hideStall);
+  }
+  function hideStall() { const s = $('#stall-overlay'); if (s) s.remove(); }
+
+  function renderMeta() {
+    renderNowPlaying();
+    const isTv = mediaType === 'tv';
+    const label = isTv ? detail.title + ' — S' + season + 'E' + episode : detail.title;
+    document.title = label + ' — J.A.R.V.I.S.';
+    $('#watch-meta').innerHTML =
+      '<span class="chip">' + (isTv ? 'SERIES' : 'FILM') + '</span>' +
+      '<b style="font-size:15px">' + J.esc(label) + '</b>' +
+      (detail.rating != null ? '<span class="chip amber">★ ' + detail.rating + '</span>' : '') +
+      (isTv ? '<a class="btn ghost small" href="/title/tv/' + idParam + '">DOSSIER</a>' : '<a class="btn ghost small" href="/title/movie/' + idParam + '">DOSSIER</a>') +
+      '<button class="btn ghost small" id="sub-toggle">SUBTITLES</button>' +
+      (isTv ? '<button class="btn small" id="next-ep-btn">NEXT EPISODE ▶</button>' : '');
+    $('#sub-toggle').addEventListener('click', () => { const p = $('#sub-panel'); p.hidden = !p.hidden; });
+    const nb = $('#next-ep-btn');
+    if (nb) nb.addEventListener('click', () => {
+      const t = computeNext();
+      if (t) switchEpisode(t.s, t.e); else logLine('auto', 'END OF SERIES');
+    });
+    renderNextUpPanel();
+  }
+
+  function renderNextUpPanel() {
+    const nu = $('#next-ep');
+    if (mediaType !== 'tv') {
+      nu.innerHTML = 'Feature presentation — no episode queue.';
+      return;
+    }
+    const t = computeNext();
+    if (!t) { nu.innerHTML = 'END OF SERIES — nothing further.'; return; }
+    const name = epName(t.s, t.e);
+    nu.innerHTML = 'UP NEXT → S' + t.s + 'E' + t.e + (name ? ' · ' + J.esc(name) : '') +
+      '<br><button class="btn small" style="margin-top:8px" id="nu-go">PLAY NOW</button>';
+    $('#nu-go').addEventListener('click', () => switchEpisode(t.s, t.e));
+  }
+
+  function computeNext() {
+    if (mediaType !== 'tv') return null;
+    const cnt = queueEpCount(season);
+    if (cnt && episode + 1 > cnt) {
+      const ns = season + 1;
+      if (detail.seasons && detail.seasons.some(s => s.seasonNumber === ns)) return { s: ns, e: 1 };
+      return null;
+    }
+    return { s: season, e: episode + 1 };
+  }
+
+  function epName(sn, en) {
+    const s = queueEpisodes.find(x => x.seasonNumber === sn);
+    if (!s) return '';
+    const e = s.episodes.find(x => x.episodeNumber === en);
+    return e ? (e.name || '') : '';
+  }
+
+  // ───────────────────────────────────────────── now playing panel ────
+
+  function nowPlayingEp() {
+    const s = queueEpisodes.find(x => x.seasonNumber === season);
+    return s ? s.episodes.find(x => x.episodeNumber === episode) : null;
+  }
+
+  function renderNowPlaying() {
+    const el = $('#now-playing');
+    if (!el || !detail) return;
+    const body = [];
+
+    if (mediaType === 'tv') {
+      const ep = nowPlayingEp();
+      const cover = (ep && ep.still) || detail.backdrop || detail.poster || '';
+      const name = (ep && ep.name) || 'Episode ' + episode;
+      const sub = detail.title + ' — S' + season + 'E' + episode +
+        (ep && ep.airDate ? ' · ' + J.fmtDate(ep.airDate) : '') +
+        (ep && ep.runtime ? ' · ' + ep.runtime + ' MIN' : '');
+      const desc = (ep && ep.overview) || detail.overview || 'No transmission data.';
+      if (cover) body.push('<img class="np-cover" src="' + J.esc(cover) + '">');
+      body.push('<div class="np-name">' + J.esc(name) + '</div>');
+      body.push('<div class="np-sub">' + J.esc(sub) + '</div>');
+      body.push('<p class="np-desc">' + J.esc(desc.slice(0, 340)) + (desc.length > 340 ? '…' : '') + '</p>');
+      if (ep && ep.rating != null) body.push('<div class="np-rating">★ ' + ep.rating + '</div>');
+    } else {
+      const cover = detail.backdrop || detail.poster || '';
+      if (cover) body.push('<img class="np-cover" src="' + J.esc(cover) + '">');
+      body.push('<div class="np-name">' + J.esc(detail.title) + '</div>');
+      body.push('<div class="np-sub">' +
+        [detail.year, detail.runtime ? detail.runtime + ' MIN' : '', detail.tagline].filter(Boolean).map(J.esc).join(' · ') + '</div>');
+      body.push('<p class="np-desc">' + J.esc((detail.overview || 'No transmission data.').slice(0, 340)) + '</p>');
+    }
+
+    el.innerHTML = '<h4>Now Playing</h4>' + body.join('');
+  }
+
+  // ─────────────────────────────────────────── episode queue (TV) ─────
+
+  let queueEpisodes = [];
+  function queueEpCount(sn) {
+    const s = queueEpisodes.find(x => x.seasonNumber === sn);
+    return s ? s.episodes.length : 0;
+  }
+
+  async function loadQueue(sn) {
+    sn = Number(sn) || season;
+    try {
+      const data = await J.getJSON('/api/season/' + idParam + '/' + sn);
+      const entry = { seasonNumber: sn, episodes: data.episodes };
+      const idx = queueEpisodes.findIndex(x => x.seasonNumber === sn);
+      if (idx >= 0) queueEpisodes[idx] = entry; else queueEpisodes.push(entry);
+      const watched = data.watched || [];
+      $('#queue-sec').hidden = false;
+      $('#queue-sub').textContent = 'SEASON ' + sn + ' — ' + data.episodes.length + ' EPISODES';
+      renderSeasonTabs(sn);
+      $('#queue-list').innerHTML = data.episodes.map(e => {
+        const w = watched.find(x => x.season === sn && x.episode === e.episodeNumber);
+        const pct = w && w.pct != null ? Math.min(100, w.pct) : null;
+        const isCurrent = sn === season && e.episodeNumber === episode;
+        const cls = 'ep-row' + (isCurrent ? ' current' : '') + (pct != null && pct > 90 ? ' watched' : '');
+        const code = 'S' + String(sn).padStart(2, '0') + 'E' + String(e.episodeNumber).padStart(2, '0');
+        const bar = pct != null
+          ? '<div class="ep-progress"><i style="width:' + pct + '%"></i></div>'
+          : '';
+        return '<a class="' + cls + '" href="/watch/tv/' + idParam + '/' + sn + '/' + e.episodeNumber + '">' +
+          '<img class="still" loading="lazy" src="' + J.esc(e.still || '') + '" onerror="this.style.visibility=\'hidden\'">' +
+          '<div class="body"><div class="code">' + code + '</div><div class="name">' + J.esc(e.name || 'Episode ' + e.episodeNumber) + '</div>' +
+          '<div class="air">' + J.esc(e.airDate || '') + '</div>' + bar + '</div></a>';
+      }).join('');
+      renderNowPlaying(); // queue data may have arrived after the player mounted
+    } catch (e) { $('#queue-sec').hidden = true; }
+  }
+
+  /** Chips for every season; active = season being browsed, dot = season on air. */
+  function renderSeasonTabs(browsing) {
+    const wrap = $('#watch-season-tabs');
+    if (!wrap) return;
+    if (mediaType !== 'tv' || !detail.seasons || !detail.seasons.length) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    wrap.innerHTML = detail.seasons.map(s =>
+      '<button class="season-tab' + (s.seasonNumber === browsing ? ' active' : '') +
+      (s.seasonNumber === season ? ' playing' : '') + '" data-s="' + s.seasonNumber + '">' +
+      'S' + String(s.seasonNumber).padStart(2, '0') +
+      (s.seasonNumber === season ? '<span class="live-dot"></span>' : '') +
+      '</button>').join('');
+  }
+
+  function gotoEpisode(ns, ne) {
+    if (ns < 1 || ne < 1) return;
+    location.href = '/watch/tv/' + idParam + '/' + ns + '/' + ne;
+  }
+
+  /** Seamless in-place episode switch: swaps the embed, no page reload. */
+  async function switchEpisode(ns, ne) {
+    cancelAutoNext();
+    season = ns; episode = ne;
+    try { history.pushState(null, '', '/watch/tv/' + idParam + '/' + ns + '/' + ne); } catch (e) { /* noop */ }
+    logLine('auto', 'SWITCHING → S' + ns + 'E' + ne);
+    await mountPlayer(0);
+  }
+
+  // Back button after an in-place switch reloads the previous episode URL.
+  window.addEventListener('popstate', () => location.reload());
+
+  // ───────────────────────────────────────── PLAYER_EVENT uplink ──────
+
+  window.addEventListener('message', (ev) => {
+    if (typeof ev.data !== 'object' || !ev.data) return;
+    // Only accept telemetry from the CURRENT player frame — during a crossfade
+    // the outgoing iframe is still mounted and must not pollute the new episode.
+    const cur = document.querySelector('iframe#player');
+    if (!cur || ev.source !== cur.contentWindow) return;
+    const d = ev.data;
+    if (d.type !== 'PLAYER_EVENT' || !d.data) return;
+    const p = d.data;
+    gotEvent = true;
+    clearWatchdog();
+    hideStall();
+    const status = p.player_status;
+    const prog = Number(p.player_progress) || 0;
+    const dur = Number(p.player_duration) || 0;
+    logEvent(status, prog, dur);
+
+    if (status === 'playing' || status === 'seeked' || status === 'paused') {
+      const now = Date.now();
+      if (status === 'playing' && now - lastSavedSec < 8000) return; // throttle
+      lastSavedSec = now;
+      saveProgress(prog, dur);
+    }
+    if (status === 'completed' && !completed) {
+      completed = true;
+      saveProgress(dur || prog, dur || prog);
+      if (mediaType === 'tv') autoNext();
+    }
+  });
+
+  function saveProgress(seconds, duration) {
+    J.postJSON('/api/progress', {
+      mediaType,
+      tmdbId: Number(idParam),
+      season: mediaType === 'tv' ? season : null,
+      episode: mediaType === 'tv' ? episode : null,
+      seconds: Math.floor(seconds || 0),
+      duration: Math.floor(duration || 0),
+      title: mediaType === 'tv' ? detail.title + ' S' + season + 'E' + episode : detail.title,
+      poster: detail.poster
+    }).catch(() => {});
+  }
+
+  function autoNextEnabled() {
+    const t = $('#auto-next-toggle');
+    return t ? t.checked : true;
+  }
+
+  function cancelAutoNext() {
+    if (autoNextTimer) { clearInterval(autoNextTimer); autoNextTimer = null; }
+    const ov = $('#next-overlay');
+    if (ov) ov.remove();
+  }
+
+  function autoNext() {
+    const t = computeNext();
+    if (!t) { logLine('auto', 'END OF SERIES — no further episodes'); return; }
+    if (!autoNextEnabled()) { logLine('auto', 'EPISODE COMPLETE — auto-next is OFF'); return; }
+    const name = epName(t.s, t.e);
+    logLine('auto', 'AUTO-NEXT → S' + t.s + 'E' + t.e + (name ? ' · ' + name : '') + ' IN 5s');
+    $('#watch-stage').insertAdjacentHTML('beforeend',
+      '<div class="next-overlay" id="next-overlay">' +
+      '<div class="nx-label">UP NEXT</div>' +
+      '<div class="nx-title">S' + t.s + 'E' + t.e + (name ? ' — ' + J.esc(name) : '') + '</div>' +
+      '<div class="nx-count"><span id="count-num">5</span></div>' +
+      '<div class="row-btns"><button class="btn" id="nx-now">PLAY NOW</button>' +
+      '<button class="btn ghost" id="nx-cancel">CANCEL</button></div></div>');
+    $('#nx-now').addEventListener('click', () => switchEpisode(t.s, t.e));
+    $('#nx-cancel').addEventListener('click', () => { cancelAutoNext(); logLine('auto', 'AUTO-NEXT CANCELLED'); });
+    let left = 5;
+    autoNextTimer = setInterval(() => {
+      left--;
+      if (left <= 0) { switchEpisode(t.s, t.e); return; }
+      const n = $('#count-num');
+      if (n) n.textContent = String(left);
+    }, 1000);
+  }
+
+  // ─────────────────────────────────────────────────── event log ──────
+
+  // Telemetry goes to the browser console only — the sidebar stays clean.
+  function logLine(cls, text) {
+    console.log('%c[J.A.R.V.I.S.] ' + cls.toUpperCase(), 'color:#38b6ff;font-weight:600', text);
+  }
+
+  function logEvent(status, prog, dur) {
+    logLine(status, J.fmtTime(prog) + ' / ' + J.fmtTime(dur));
+  }
+
+  // ------------------------------------------------ subtitles ----------
+  $('#sub-apply').addEventListener('click', () => {
+    const url = $('#sub-url').value.trim();
+    if (!url) return;
+    const qs = new URLSearchParams(location.search);
+    qs.set('subUrl', url);
+    qs.set('subLang', $('#sub-lang').value.trim());
+    qs.set('subLabel', $('#sub-label').value.trim());
+    qs.set('subDefault', $('#sub-default').checked ? 'true' : 'false');
+    location.search = qs.toString();
+  });
+  // apply ?subUrl=... from the URL on mount
+  (function applySubsFromQuery() {
+    const qs = new URLSearchParams(location.search);
+    const subUrl = qs.get('subUrl');
+    if (!subUrl) return;
+    const orig = J.getJSON;
+    J.getJSON = function (path, opts) {
+      if (path.startsWith('/api/embed-url?')) {
+        path += '&subUrl=' + encodeURIComponent(qs.get('subUrl'));
+        if (qs.get('subLang')) path += '&subLang=' + encodeURIComponent(qs.get('subLang'));
+        if (qs.get('subLabel')) path += '&subLabel=' + encodeURIComponent(qs.get('subLabel'));
+        if (qs.get('subDefault')) path += '&subDefault=' + encodeURIComponent(qs.get('subDefault'));
+      }
+      return orig.call(J, path, opts);
+    };
+  })();
+})();
+</script>
+</body>
+</html>
