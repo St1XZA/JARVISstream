@@ -28,20 +28,37 @@
     .then(() => { J.buildShell(); J.footer(); load(); });
 
   function load() {
+    // Local-first: the browser cache is the primary source for the flight
+    // recorder; server records the cache does not know are merged in.
+    const localItems = J.localProgress();
+    const seen = new Set(localItems.map(i => i.key));
     J.getJSON('/api/history')
-      .then(d => render(d.items || []))
-      .catch(e => {
-        $('#hist-list').innerHTML = '<div class="blocker small"><h3>RECORDER OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
-      });
+      .then(d => {
+        const merged = localItems.concat((d.items || []).filter(i => !seen.has(i.key)));
+        render(merged);
+      })
+      .catch(() => render(localItems)); // offline-safe: local cache alone
   }
 
+  function deleteRecord(r) {
+    // Local-first delete: remove from the browser cache, mirror to the server.
+    J.localDeleteProgress(r.mediaType, r.tmdbId,
+      r.mediaType === 'tv' ? r.season : null,
+      r.mediaType === 'tv' ? r.episode : null);
+    load();
+  }
+
+  const renderIndex = new Map(); // key -> record, for one-click local deletion
+
   function render(items) {
+    renderIndex.clear();
     $('#hist-sub').textContent = items.length + ' RECORDS';
     if (!items.length) {
       $('#hist-list').innerHTML = '<div class="blocker small"><h3>NO FLIGHT RECORDS</h3><p>Start a transmission and J.A.R.V.I.S. will track your position.</p></div>';
       return;
     }
     $('#hist-list').innerHTML = items.map(r => {
+      if (r.key) renderIndex.set(r.key, r);
       const isTv = r.mediaType === 'tv';
       const label = isTv ? (r.title || 'Series') : (r.title || 'Film');
       const href = isTv
@@ -68,20 +85,23 @@
   $('#hist-list').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-del]');
     if (!btn) return;
-    const key = btn.getAttribute('data-del');
-    const parts = key.split(':'); // mediaType:tmdbId[:season:episode]
-    const qs = new URLSearchParams({ mediaType: parts[0], tmdbId: parts[1] });
-    if (parts.length === 4) { qs.set('season', parts[2]); qs.set('episode', parts[3]); }
-    J.delJSON('/api/history?' + qs).then(load);
+    const rec = renderIndex.get(btn.getAttribute('data-del'));
+    if (rec) deleteRecord(rec);
   });
 
   $('#hist-clear').addEventListener('click', () => {
-    J.getJSON('/api/history').then(d => Promise.all((d.items || []).map(r => {
-      const parts = r.key.split(':');
-      const qs = new URLSearchParams({ mediaType: parts[0], tmdbId: parts[1] });
-      if (parts.length === 4) { qs.set('season', parts[2]); qs.set('episode', parts[3]); }
-      return J.delJSON('/api/history?' + qs);
-    }))).then(load);
+    // Local-first clear: wipe the browser cache, mirror the tally to the server.
+    const all = J.localProgress();
+    J.localDeleteAllProgress();
+    all.filter(r => !r.mediaType).forEach(r => { // server-only stragglers
+      const parts = String(r.key || '').split(':');
+      if (parts.length >= 2) {
+        const qs = new URLSearchParams({ mediaType: parts[0], tmdbId: parts[1] });
+        if (parts.length === 4) { qs.set('season', parts[2]); qs.set('episode', parts[3]); }
+        J.delJSON('/api/history?' + qs).catch(() => {});
+      }
+    });
+    load();
   });
 })();
 </script>

@@ -34,13 +34,25 @@
       </div>
 
       <div class="sub-panel" style="margin-top:16px">
+        <h4>Uplink</h4>
+        <label class="auto-next-row" style="display:block">UPLINK SOURCE</label>
+        <select id="provider-toggle" style="width:100%;margin-top:4px">
+          <option value="vaplayer">VAPLAYER (VidAPI)</option>
+          <option value="vidfast">VIDFAST.VC</option>
+          <option value="moviesapi">MOVIESAPI.TO</option>
+        </select>
+        <div id="provider-note" style="font-family:var(--mono);font-size:10px;color:var(--text-faint);line-height:1.7;margin-top:6px"></div>
+        <div id="provider-warn" style="display:none;font-family:var(--mono);font-size:10px;color:var(--amber);line-height:1.7;margin-top:6px">⚠ If the player itself reports an error, this network is blocking the uplink's stream sources — try another uplink.</div>
+      </div>
+
+      <div class="sub-panel" style="margin-top:16px">
         <h4>Next Episode</h4>
         <label class="auto-next-row"><input type="checkbox" id="auto-next-toggle"> AUTO-NEXT EPISODE</label>
         <div id="next-ep" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);line-height:1.7">—</div>
       </div>
 
       <div class="sub-panel" style="margin-top:16px">
-        <h4>Embed Inspector</h4>
+        <h4>Embed Inspector <span id="embed-provider" style="float:right;color:#ff7b1f"></span></h4>
         <div id="embed-url" style="font-family:var(--mono);font-size:10px;color:var(--text-faint);word-break:break-all;line-height:1.6">—</div>
       </div>
     </aside>
@@ -71,8 +83,15 @@
   let completed = false;
   let autoNextTimer = null;
   let watchdog = null;
+  let uplinkGrace = null;
   let gotEvent = false;
   let lastResume = 0;
+  // Three uplinks: vaplayer (full telemetry, custom subs), vidfast.vc and
+  // moviesapi.to (no documented telemetry — progress/auto-next inert there).
+  const PROVIDERS = ['vaplayer', 'vidfast', 'moviesapi'];
+  const NO_TELEMETRY = ['vidfast', 'moviesapi'];
+  const stored = localStorage.getItem('jarvis.provider');
+  let provider = PROVIDERS.includes(stored) ? stored : 'vaplayer';
 
   J.runBoot([
     { label: 'Resolving signal', run: () => 'OK' },
@@ -89,6 +108,18 @@
       logLine('info', 'AUTO-NEXT ' + (tgl.checked ? 'ENABLED' : 'DISABLED'));
     });
 
+    // Uplink selector: swap providers without leaving the page.
+    const pt = $('#provider-toggle');
+    pt.value = provider;
+    updateProviderNote();
+    pt.addEventListener('change', () => {
+      provider = pt.value;
+      localStorage.setItem('jarvis.provider', provider);
+      updateProviderNote();
+      logLine('info', 'UPLINK → ' + provider.toUpperCase() + ' — remounting player');
+      mountPlayer(lastResume);
+    });
+
     // Season selector: browse any season's queue without touching the player.
     $('#watch-season-tabs').addEventListener('click', (e) => {
       const b = e.target.closest('.season-tab');
@@ -99,9 +130,9 @@
     $('#queue-list').addEventListener('click', (e) => {
       const a = e.target.closest('a.ep-row');
       if (!a) return;
-      const parts = a.getAttribute('href').split('/'); // /watch/tv/{id}/{s}/{e}
+      const parts = a.getAttribute('href').split('/'); // ['', 'watch', 'tv', id, s, e]
       e.preventDefault();
-      switchEpisode(Number(parts[3]), Number(parts[4]));
+      switchEpisode(Number(parts[4]), Number(parts[5]));
     });
     try {
       if (/^tt\d+$/i.test(idParam)) {
@@ -130,6 +161,7 @@
     gotEvent = false;
     cancelAutoNext();
     clearWatchdog();
+    clearUplinkGrace();
     hideStall();
     const stage = $('#watch-stage');
     // Crossfade: an existing player stays mounted underneath (dimmed) while the
@@ -140,18 +172,27 @@
     else if (oldPlayer) oldPlayer.classList.add('fade-dim');
     let resumeAt = resumeOverride;
     if (resumeAt == null) {
-      try {
-        const pr = await J.getJSON('/api/progress?mediaType=' + mediaType + '&tmdbId=' + idParam +
-          (mediaType === 'tv' ? '&season=' + season + '&episode=' + episode : ''));
-        resumeAt = pr.rec ? pr.rec.seconds : 0;
-      } catch (e) { resumeAt = 0; }
+      // Local-first: prefer the browser-cache record; fall back to the server.
+      const local = J.localGetProgress(mediaType, idParam, mediaType === 'tv' ? season : null, mediaType === 'tv' ? episode : null);
+      if (local) {
+        resumeAt = local.seconds;
+      } else {
+        try {
+          const pr = await J.getJSON('/api/progress?mediaType=' + mediaType + '&tmdbId=' + idParam +
+            (mediaType === 'tv' ? '&season=' + season + '&episode=' + episode : ''));
+          resumeAt = pr.rec ? pr.rec.seconds : 0;
+        } catch (e) { resumeAt = 0; }
+      }
     }
     lastResume = resumeAt || 0;
 
     const qs = new URLSearchParams({
       mediaType, tmdbId: idParam,
       season: String(season), episode: String(episode),
-      resumeAt: String(Math.max(0, resumeAt || 0))
+      resumeAt: String(Math.max(0, resumeAt || 0)),
+      provider,
+      // vidfast maps this to its native nextButton/autoNext params.
+      autoNext: $('#auto-next-toggle').checked ? '1' : '0'
     });
     const resp = await J.getJSON('/api/embed-url?' + qs);
     embedUrl = resp.embedUrl;
@@ -166,11 +207,13 @@
       iframe = oldPlayer;
       iframe.classList.remove('fade-dim', 'fade-out', 'pre');
       iframe.src = embedUrl; // same node → fullscreen persists across the swap
+      iframe.addEventListener('load', () => probeEmbedFrame(iframe), { once: true });
     } else {
       iframe = document.createElement('iframe');
       iframe.id = 'player';
       iframe.className = 'pre';
       iframe.src = embedUrl;
+      // encrypted-media: required by vidfast.vc, harmless for vaplayer.
       iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
       if (oldPlayer) oldPlayer.removeAttribute('id'); // only the new frame owns #player
       stage.appendChild(iframe);
@@ -179,6 +222,7 @@
     renderMeta();
     if (mediaType === 'tv') loadQueue();
     armWatchdog();
+    armUplinkGrace();
 
     if (reuse) {
       // Same-node swap: no crossfade needed — the node just keeps playing.
@@ -187,6 +231,7 @@
       return;
     }
 
+    iframe.addEventListener('load', () => probeEmbedFrame(iframe), { once: true });
     // Reveal the new player once it has content (or after a fallback), then
     // retire the dimmed old frame — a short crossfade, no hard cut.
     let revealed = false;
@@ -209,6 +254,7 @@
 
   function armWatchdog() {
     clearWatchdog();
+    if (NO_TELEMETRY.includes(provider)) return; // no postMessage telemetry from these hosts
     watchdog = setTimeout(() => {
       if (gotEvent) return;
       logLine('warn', 'NO TELEMETRY — vaplayer.ru not responding');
@@ -222,13 +268,57 @@
     $('#watch-stage').insertAdjacentHTML('beforeend',
       '<div class="stall-overlay" id="stall-overlay">' +
       '<div class="icon">⚠</div><h3>TRANSMISSION STALLED</h3>' +
-      '<p>vaplayer.ru did not respond in time. The host may be down, blocked in your region, or your domain is not whitelisted with VidAPI yet. Discovery pages keep working regardless.</p>' +
+      '<p>The player host did not respond in time — it may be down or blocked in your region (VidAPI also requires domain whitelisting). Try the other uplink in the sidebar. Discovery pages keep working regardless.</p>' +
       '<div class="row-btns"><button class="btn" id="stall-retry">RETRY</button>' +
       '<button class="btn ghost" id="stall-dismiss">DISMISS</button></div></div>');
     $('#stall-retry').addEventListener('click', () => { hideStall(); mountPlayer(lastResume); });
     $('#stall-dismiss').addEventListener('click', hideStall);
   }
   function hideStall() { const s = $('#stall-overlay'); if (s) s.remove(); }
+
+  // Uplink grace: telemetry-less hosts emit no events, so if the embed's shell
+  // never even loads (dead or blocked domain), surface an actionable strip.
+  function armUplinkGrace() {
+    clearUplinkGrace();
+    if (!NO_TELEMETRY.includes(provider)) return; // vaplayer has the watchdog
+    uplinkGrace = setTimeout(showUplinkStrip, 15000);
+  }
+  function clearUplinkGrace() {
+    if (uplinkGrace) { clearTimeout(uplinkGrace); uplinkGrace = null; }
+    const s = $('#uplink-strip');
+    if (s) s.remove();
+  }
+  // On `load`, distinguish a real cross-origin embed (contentDocument access
+  // throws) from a browser error/blank page (accessible): a blocked or dead
+  // uplink shows the strip immediately instead of after the 15 s grace timer.
+  function probeEmbedFrame(iframe) {
+    if (!NO_TELEMETRY.includes(provider)) return; // vaplayer: stall watchdog owns failure UX
+    let accessible = false;
+    try { void iframe.contentDocument; accessible = true; } catch (e) { /* cross-origin = healthy */ }
+    if (uplinkGrace) { clearTimeout(uplinkGrace); uplinkGrace = null; }
+    if (accessible) showUplinkStrip();
+  }
+  function showUplinkStrip() {
+    if (!NO_TELEMETRY.includes(provider)) return; // vaplayer failures use the stall watchdog
+    const stage = $('#watch-stage');
+    if (!stage || stage.querySelector('.uplink-strip') || $('#stall-overlay')) return;
+    const host = provider === 'vidfast' ? 'vidfast.vc' : 'moviesapi.to';
+    stage.insertAdjacentHTML('beforeend',
+      '<div class="uplink-strip" id="uplink-strip">' +
+      '<div class="icon">⚠</div><b>UPLINK NOT RESPONDING</b>' +
+      '<p>The ' + host + ' embed shell did not load. Its stream sources are commonly unreachable on filtered networks — discovery pages keep working. Try another uplink.</p>' +
+      '<div class="row-btns"><button class="btn" id="us-vaplayer">SWITCH TO VAPLAYER</button>' +
+      '<button class="btn ghost" id="us-dismiss">DISMISS</button></div></div>');
+    $('#us-vaplayer').addEventListener('click', () => {
+      const s = $('#provider-toggle');
+      s.value = 'vaplayer';
+      s.dispatchEvent(new Event('change'));
+    });
+    $('#us-dismiss').addEventListener('click', () => {
+      const s = $('#uplink-strip');
+      if (s) s.remove();
+    });
+  }
 
   function renderMeta() {
     renderNowPlaying();
@@ -421,16 +511,18 @@
   });
 
   function saveProgress(seconds, duration) {
-    J.postJSON('/api/progress', {
+    // Local-first: written to localStorage immediately, then mirrored to the
+    // server so another browser/device can also resume.
+    J.setLocalProgress(
       mediaType,
-      tmdbId: Number(idParam),
-      season: mediaType === 'tv' ? season : null,
-      episode: mediaType === 'tv' ? episode : null,
-      seconds: Math.floor(seconds || 0),
-      duration: Math.floor(duration || 0),
-      title: mediaType === 'tv' ? detail.title + ' S' + season + 'E' + episode : detail.title,
-      poster: detail.poster
-    }).catch(() => {});
+      Number(idParam),
+      mediaType === 'tv' ? season : null,
+      mediaType === 'tv' ? episode : null,
+      Math.floor(seconds || 0),
+      Math.floor(duration || 0),
+      mediaType === 'tv' ? detail.title + ' S' + season + 'E' + episode : detail.title,
+      detail.poster
+    );
   }
 
   function autoNextEnabled() {
@@ -472,7 +564,18 @@
 
   // Telemetry goes to the browser console only — the sidebar stays clean.
   function logLine(cls, text) {
-    console.log('%c[J.A.R.V.I.S.] ' + cls.toUpperCase(), 'color:#38b6ff;font-weight:600', text);
+    console.log('%c[J.A.R.V.I.S.' + (NO_TELEMETRY.includes(provider) ? '·' + provider.toUpperCase() : '') + '] ' + cls.toUpperCase(), 'color:#38b6ff;font-weight:600', text);
+  }
+
+  function updateProviderNote() {
+    const el = $('#provider-note');
+    if (el) el.textContent = NO_TELEMETRY.includes(provider)
+      ? 'No telemetry from this host: progress cannot be tracked here — watch history and resume points only update for VAPLAYER. Episode advance relies on the host\'s own player controls.'
+      : 'Full telemetry: resume points saved to your browser (localStorage) + server, watch history, auto-next overlay.';
+    const ep = $('#embed-provider');
+    if (ep) ep.textContent = provider.toUpperCase();
+    const w = $('#provider-warn');
+    if (w) w.style.display = NO_TELEMETRY.includes(provider) ? 'block' : 'none';
   }
 
   function logEvent(status, prog, dur) {

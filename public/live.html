@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live TV — J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%2338b6ff' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%236fd6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/styles.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js" defer></script>
+</head>
+<body data-page="live">
+<div class="wrap">
+
+  <!-- browse view -->
+  <section id="live-browse">
+    <div class="section-head">
+      <h2>Live TV</h2><span class="sub" id="live-sub">loading channel database…</span>
+      <span class="spacer"></span><a href="https://github.com/iptv-org/iptv" target="_blank" rel="noopener">IPTV-ORG ↗</a>
+    </div>
+    <div class="live-controls">
+      <input id="live-search" type="text" placeholder="Search channels…  ⏎" autocomplete="off">
+      <select id="live-country"><option value="">🌍 ALL COUNTRIES</option></select>
+      <label class="nsfw-toggle" title="Show adult channels (18+)"><input type="checkbox" id="live-nsfw"> 18+</label>
+    </div>
+    <div class="chips" id="live-cats"></div>
+    <div class="grid" id="live-grid"><div class="state">LOADING<span class="bar"><i></i></span></div></div>
+    <div class="load-more-row"><button class="btn" id="live-more">LOAD MORE</button></div>
+  </section>
+
+  <!-- player view -->
+  <section id="live-player" hidden>
+    <div class="section-head">
+      <button class="btn ghost small" id="live-back">← ALL CHANNELS</button>
+      <span class="sub" id="live-ch-meta"></span>
+    </div>
+    <div class="live-stage brackets" id="live-stage">
+      <video id="live-video" controls playsinline autoplay muted></video>
+    </div>
+    <div class="live-feeds" id="live-feed-row">
+      <label style="font-family:var(--mono);font-size:10px;color:var(--text-dim)">FEED</label>
+      <select id="live-feed"></select>
+      <button class="btn ghost small" id="live-retry">RETRY</button>
+      <span id="live-status" style="font-family:var(--mono);font-size:10px;color:var(--text-faint)"></span>
+    </div>
+  </section>
+
+</div>
+<script src="/assets/core.js"></script>
+<script>
+'use strict';
+(function () {
+  const J = window.JARVIS;
+  const $ = J.$;
+  const $$ = J.$$;
+
+  let category = '', searchQ = '', page = 1, cur = null, hls = null;
+  // NSFW channels are excluded by default; this only flips a *filter on the
+  // server* (nsfw=1) — it is opt-in per user, persisted in this browser.
+  let nsfw = false;
+  try { nsfw = localStorage.getItem('jarvis.liveNsfw') === '1'; } catch (e) { /* private mode */ }
+  const PAGESIZE = 60;
+
+  J.runBoot([
+    { label: 'HUD shell', run: () => 'OK' },
+    { label: 'Channel database', run: () => J.getJSON('/api/iptv/status').then(s => {
+        if (!s.ok) throw new Error(s.note || s.error || 'offline');
+        return s.liveChannels.toLocaleString() + ' LIVE CHANNELS';
+      }) }
+  ]).then(() => { J.buildShell(); J.footer(); init(); }).catch(bootFailed);
+
+  function bootFailed(e) {
+    J.buildShell(); J.footer();
+    $('#live-sub').textContent = 'DATABASE OFFLINE';
+    $('#live-grid').innerHTML = '<div class="blocker small"><h3>LIVE TV OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
+    $('#live-more').disabled = true;
+  }
+
+  function init() {
+    // category chips
+    J.getJSON('/api/iptv/categories').then(d => {
+      $('#live-cats').innerHTML =
+        '<button class="chip-btn active" data-c="">ALL</button>' +
+        (d.categories || []).filter(c => c.count > 0)
+          .map(c => '<button class="chip-btn" data-c="' + c.id + '">' + J.esc(c.name.toUpperCase()) + '</button>').join('');
+    }).catch(() => {
+      $('#live-cats').innerHTML = '<span class="sub">categories unavailable</span>';
+    });
+    try { $('#live-nsfw').checked = nsfw; } catch (e) { /* noop */ }
+
+    // country select (facets already sorted busiest-first)
+    J.getJSON('/api/iptv/countries').then(d => {
+      $('#live-country').innerHTML =
+        '<option value="">🌍 ALL COUNTRIES</option>' +
+        (d.countries || []).map(c =>
+          '<option value="' + c.code + '">' + (c.flag || '') + ' ' + J.esc(c.name) + ' (' + c.count.toLocaleString() + ')</option>').join('');
+    }).catch(() => {});
+
+    load(true);
+  }
+
+  function load(reset) {
+    if (reset) { page = 1; }
+    $('#live-more').disabled = true;
+    $('#live-more').textContent = 'SCANNING…';
+    const qs = new URLSearchParams({ limit: String(PAGESIZE), offset: String((page - 1) * PAGESIZE) });
+    if (category) qs.set('category', category);
+    if (searchQ) qs.set('q', searchQ);
+    const country = $('#live-country').value;
+    if (country) qs.set('country', country);
+    if (nsfw) qs.set('nsfw', '1');
+    J.getJSON('/api/iptv/channels?' + qs)
+      .then(data => {
+        if (!data.ok) throw new Error(data.note || data.error || 'catalog offline');
+        const grid = $('#live-grid');
+        if (page === 1) grid.innerHTML = '';
+        if (page === 1 && (!data.items || !data.items.length)) {
+          grid.innerHTML = '<div class="blocker small"><h3>NO CHANNELS FOUND</h3><p>Try another country, category, or search term.</p></div>';
+        } else {
+          grid.insertAdjacentHTML('beforeend', data.items.map(chCard).join(''));
+        }
+        $('#live-sub').textContent = data.total.toLocaleString() + ' CHANNELS' +
+          (searchQ ? ' · “' + searchQ + '”' : '');
+        const lastPage = Math.ceil(data.total / PAGESIZE);
+        $('#live-more').disabled = page >= lastPage;
+        $('#live-more').textContent = page >= lastPage ? 'END OF DATABASE' : 'LOAD MORE';
+        page++;
+      })
+      .catch(e => {
+        $('#live-grid').innerHTML = '<div class="blocker small"><h3>CHANNEL DATABASE OFFLINE</h3><p>' + J.esc(e.message) + '</p></div>';
+        $('#live-more').disabled = true;
+      });
+  }
+
+  function chCard(ch) {
+    const flag = ch.country ? (ch.country + ' ') : '';
+    const cats = (ch.categories || []).map(c => c.toUpperCase()).slice(0, 3).join(' · ');
+    const logo = ch.logo
+      ? '<img alt="" loading="lazy" src="' + J.esc(ch.logo) + '">'
+      : '<div class="ch-noimg">NO SIGNAL</div>';
+    return '<button class="card ch-card brackets" data-ch="' + J.esc(ch.id) + '">' +
+      '<span class="badge">LIVE</span>' +
+      (ch.isNsfw ? '<span class="badge nsfw">18+</span>' : '') +
+      '<div class="ch-logo">' + logo + '</div>' +
+      '<div class="info"><div class="t" title="' + J.esc(ch.name) + '">' + J.esc(ch.name) + '</div>' +
+      '<div class="m"><span>' + J.esc(flag) + '</span>' +
+      (ch.quality ? '<span class="r">' + ch.quality + '</span>' : '<span class="r">' + ch.urlCount + ' FEED' + (ch.urlCount > 1 ? 'S' : '') + '</span>') +
+      '</div></div>' +
+      (cats ? '<div class="ch-cats">' + J.esc(cats) + '</div>' : '') +
+      '</button>';
+  }
+
+  // ─────────────────────────────────────────────── player ────────────────
+
+  function chFetch(id) {
+    return J.getJSON('/api/iptv/channel/' + encodeURIComponent(id));
+  }
+
+  function openChannel(card) {
+    const id = card.getAttribute('data-ch');
+    cur = null; // will be set after fetch
+    $('#live-browse').hidden = true;
+    $('#live-player').hidden = false;
+    $('#live-ch-meta').textContent = 'RESOLVING…';
+    $('#live-stage').classList.add('loading');
+    $('#live-feed').innerHTML = '<option>loading…</option>';
+    $('#live-status').textContent = '';
+    chFetch(id).then(ch => {
+      if (!ch || !ch.ok) throw new Error('channel not found');
+      cur = ch;
+      $('#live-ch-meta').textContent = ch.name + ' — ' + (ch.country ? ch.country + ' · ' : '') +
+        (ch.quality || 'quality unknown') + ' · ' + ch.urlCount + ' feed(s)';
+      $('#live-feed').innerHTML = ch.feeds.map((f, i) => {
+        const label = 'FEED ' + (i + 1) + (f.quality ? ' · ' + f.quality : '') +
+          (f.labels && f.labels.length ? ' · ' + f.labels.join(', ') : '') +
+          (f.title && f.title !== ch.name ? ' — ' + f.title : '');
+        return '<option value="' + i + '">' + J.esc(label.slice(0, 90)) + '</option>';
+      }).join('');
+      playFeed(0);
+    }).catch(e => hookError(e.message));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function playFeed(i) {
+    if (!cur) return;
+    stop();
+    const v = $('#live-video');
+    const feed = cur.feeds[i];
+    if (!feed) return;
+    $('#live-stage').classList.remove('loading');
+    $('#live-status').textContent = 'CONNECTING…';
+    v.removeEventListener('playing', onPlaying);
+    v.addEventListener('playing', onPlaying);
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({ maxBufferLength: 30 });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data.fatal) return;
+        const why = data.type === Hls.ErrorTypes.NETWORK_ERROR
+          ? 'source host unreachable or blocked on this network'
+          : 'stream decode failure';
+        hookError('Playback failed — ' + why + '. Try another feed below.');
+      });
+      hls.loadSource(feed.url);
+      hls.attachMedia(v);
+    } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+      v.src = feed.url; // Safari / native HLS
+      v.onerror = () => hookError('Playback failed on this device.');
+    } else {
+      hookError('No HLS support in this browser and the hls.js CDN is unreachable.');
+    }
+  }
+
+  function onPlaying() {
+    // playback confirmed — label the feed quality + clock
+    $('#live-status').textContent = 'LIVE';
+  }
+
+  function hookError(msg) {
+    $('#live-status').textContent = msg;
+    $('#live-stage').classList.remove('loading');
+  }
+
+  function stop() {
+    if (hls) { hls.destroy(); hls = null; }
+    const v = $('#live-video');
+    v.removeAttribute('src');
+    v.onerror = null;
+    try { v.load(); } catch (e) { /* noop */ }
+  }
+
+  function backToBrowse() {
+    stop();
+    cur = null;
+    $('#live-player').hidden = true;
+    $('#live-browse').hidden = false;
+  }
+
+  // ─────────────────────────────────────────────── events ────────────────
+
+  $('#live-cats').addEventListener('click', e => {
+    const b = e.target.closest('.chip-btn');
+    if (!b) return;
+    $$('#live-cats .chip-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    category = b.dataset.c;
+    load(true);
+  });
+  $('#live-country').addEventListener('change', () => load(true));
+  $('#live-nsfw').addEventListener('change', (e) => {
+    nsfw = e.target.checked;
+    try { localStorage.setItem('jarvis.liveNsfw', nsfw ? '1' : '0'); } catch (err) { /* private mode */ }
+    if (nsfw) $('#live-sub').textContent = '18+ CHANNELS INCLUDED';
+    load(true);
+  });
+  $('#live-search').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    searchQ = $('#live-search').value.trim();
+    load(true);
+  });
+  $('#live-more').addEventListener('click', () => load(false));
+  $('#live-back').addEventListener('click', backToBrowse);
+  $('#live-feed').addEventListener('change', () => playFeed(Number($('#live-feed').value) || 0));
+  $('#live-retry').addEventListener('click', () => playFeed(Number($('#live-feed').value) || 0));
+  $('#live-grid').addEventListener('click', e => {
+    const c = e.target.closest('.ch-card');
+    if (c) openChannel(c);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Personal watch data — never commit (identifies what a user watches)
+data/
+
+# Runtime logs — can contain IPs / request paths
+.freebuff/*.log
+.freebuff/*.log.err
+.freebuff/*.err
+*.freebuffpreview.err
+*.freebuffpreview.log
+
+# Build artifacts / stray archives
+public.zip
+node_modules/
+
+# Secrets
+.env

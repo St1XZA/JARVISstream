@@ -96,9 +96,18 @@
   }
 
   async function loadContinue() {
+    // Local-first: read Continue Watching straight from the browser cache so it
+    // renders instantly and survives server data loss. Server merge only adds
+    // records the local cache does not know about (e.g. another device).
     try {
-      const h = await J.getJSON('/api/history');
-      const items = (h.items || []).filter(i => i.pct != null && i.pct > 1 && i.pct < 97).slice(0, 12);
+      const localItems = J.localProgress().filter(i => i.pct != null && i.pct > 1 && i.pct < 97);
+      let items = localItems.slice(0, 12);
+      if (items.length < 12) {
+        const seen = new Set(localItems.map(i => i.key));
+        const h = await J.getJSON('/api/history');
+        items = items.concat((h.items || []).filter(i =>
+          i.pct != null && i.pct > 1 && i.pct < 97 && !seen.has(i.key)).slice(0, 12 - items.length));
+      }
       if (!items.length) return;
       $('#continue-sec').hidden = false;
       $('#continue-sub').textContent = items.length + ' IN PROGRESS';

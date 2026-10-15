@@ -31,6 +31,7 @@
 (function () {
   const J = window.JARVIS;
   const $ = J.$;
+  const $$ = J.$$;
   const isTv = location.pathname === '/series';
   const preGenre = new URLSearchParams(location.search).get('genre') || '';
   let genre = preGenre, page = 1;

@@ -31,6 +31,8 @@
     $('#app').innerHTML = J.stateHTML('app-state');
     try {
       detail = await J.getJSON('/api/title/' + mt + '/' + id);
+      // Local-first watchlist state: the browser cache wins over the server copy.
+      detail.inWatchlist = J.localWatchlistHas(mt, id);
       document.title = detail.title + ' — J.A.R.V.I.S.';
       render();
       if (mt === 'tv' && detail.seasons.length) {
@@ -146,17 +148,17 @@
 
   async function toggleWatchlist() {
     const btn = $('#wl-btn');
-    try {
-      if (detail.inWatchlist) {
-        await J.delJSON('/api/watchlist?mediaType=' + mt + '&tmdbId=' + id);
-        detail.inWatchlist = false;
-        btn.textContent = '+ WATCHLIST';
-      } else {
-        await J.postJSON('/api/watchlist', { mediaType: mt, tmdbId: Number(id), title: detail.title, poster: detail.poster, year: detail.year, rating: detail.rating });
-        detail.inWatchlist = true;
-        btn.textContent = '✓ IN WATCHLIST';
-      }
-    } catch (e) { /* noop */ }
+    // Local-first: the browser cache (localStorage) is authoritative and
+    // instant; the server copy is mirrored best-effort.
+    if (detail.inWatchlist) {
+      J.localWatchlistRemove(mt, id);
+      detail.inWatchlist = false;
+      btn.textContent = '+ WATCHLIST';
+    } else {
+      J.localWatchlistAdd({ mediaType: mt, tmdbId: Number(id), title: detail.title, poster: detail.poster, year: detail.year, rating: detail.rating });
+      detail.inWatchlist = true;
+      btn.textContent = '✓ IN WATCHLIST';
+    }
   }
 
   // delegate season tab clicks (tabs rendered after load)

@@ -9,6 +9,8 @@
  * APIs     : /api/trending /api/list /api/search /api/title /api/season
  *            /api/similar /api/genres /api/progress /api/history /api/watchlist
  *            /api/vidapi/stats /api/vidapi/latest/... /api/vidapi/ids/...
+ *            /api/iptv/status /api/iptv/channels /api/iptv/categories
+ *            /api/iptv/countries   (live TV via iptv-org)
  * Health   : /api/health
  */
 
@@ -20,6 +22,7 @@ const { URL } = require('url');
 const tmdb = require('./lib/tmdb');
 const vidapi = require('./lib/vidapi');
 const store = require('./lib/store');
+const iptv = require('./lib/iptv');
 
 // PORT=0 (or unset/invalid) falls back to 3000 — an ephemeral port is useless for previews.
 const PORT = Number(process.env.PORT) > 0 ? Number(process.env.PORT) : 3000;
@@ -106,7 +109,36 @@ async function resolveWatchContext(mediaType, idParam, season, episode) {
   return d;
 }
 
+// Accepted /api/embed-url provider slugs (watch page persists the choice).
+const PROVIDERS = ['vaplayer', 'vidfast', 'moviesapi'];
+
 function embedFor(details, opts) {
+  // Alternate uplinks: different param vocabulary, no VidAPI telemetry.
+  if (opts.provider === 'vidfast') {
+    return vidapi.buildVidfastUrl({
+      imdbId: details.imdbId || null,
+      tmdbId: details.tmdbId || details.id,
+      mediaType: details.mediaType,
+      season: opts.season,
+      episode: opts.episode,
+      color: vidapi.JARVIS_COLOR,
+      autoplay: opts.autoplay !== undefined ? opts.autoplay : true,
+      startAt: Number.isFinite(opts.resumeAt) && opts.resumeAt > 5 ? Math.floor(opts.resumeAt) : opts.startAt,
+      subLang: opts.subLang,
+      nextButton: opts.autoNext !== undefined ? !!opts.autoNext : true,
+      autoNext: opts.autoNext !== undefined ? !!opts.autoNext : true
+    });
+  }
+  // moviesapi.to documents no optional params — pure ID-path embeds.
+  if (opts.provider === 'moviesapi') {
+    return vidapi.buildMoviesapiUrl({
+      imdbId: details.imdbId || null,
+      tmdbId: details.tmdbId || details.id,
+      mediaType: details.mediaType,
+      season: opts.season,
+      episode: opts.episode
+    });
+  }
   return vidapi.buildEmbedUrl({
     imdbId: details.imdbId || null,
     tmdbId: details.tmdbId || details.id,
@@ -266,6 +298,74 @@ async function handleApi(req, res, u) {
     }
   }
 
+  // ------------------------------------------------------ LIVE TV (iptv-org) --
+  if (p === '/api/iptv/status') {
+    try {
+      await iptv.ensureData();
+      return sendJson(res, 200, iptv.status());
+    } catch (e) {
+      return sendJson(res, 200, Object.assign(iptv.status(), {
+        degraded: true,
+        error: e.message,
+        note: 'iptv-org.github.io unreachable from this network — Live TV is offline here.'
+      }));
+    }
+  }
+
+  if (p === '/api/iptv/categories') {
+    try {
+      await iptv.ensureData();
+      return sendJson(res, 200, { ok: true, categories: iptv.categoryFacets() });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, degraded: true, error: e.message, categories: [] });
+    }
+  }
+
+  if (p === '/api/iptv/countries') {
+    try {
+      await iptv.ensureData();
+      return sendJson(res, 200, { ok: true, countries: iptv.countryFacets() });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, degraded: true, error: e.message, countries: [] });
+    }
+  }
+
+  if ((m = /^\/api\/iptv\/channel\/([\w.-]+)$/.exec(p))) {
+    try {
+      await iptv.ensureData();
+      const ch = iptv.getChannel(m[1]);
+      if (!ch) return sendError(res, 404, 'no such channel: ' + m[1]);
+      return sendJson(res, 200, Object.assign({ ok: true, source: 'iptv-org' }, ch));
+    } catch (e) {
+      return sendJson(res, e.upstreamDown ? 503 : 500, { ok: false, degraded: true, error: e.message });
+    }
+  }
+
+  if (p === '/api/iptv/channels') {
+    try {
+      await iptv.ensureData();
+      const limit = Math.min(Number(u.searchParams.get('limit')) || 60, 200);
+      const offset = Math.max(Number(u.searchParams.get('offset')) || 0, 0);
+      const r = iptv.listChannels({
+        country: u.searchParams.get('country') || undefined,
+        category: u.searchParams.get('category') || undefined,
+        search: u.searchParams.get('q') || undefined,
+        // NSFW channels are opt-in, never default
+        nsfw: u.searchParams.get('nsfw') === '1',
+        sort: u.searchParams.get('sort') === 'feeds' ? 'feeds' : 'name',
+        limit,
+        offset
+      });
+      return sendJson(res, 200, Object.assign({ ok: true, source: 'iptv-org' }, r));
+    } catch (e) {
+      return sendJson(res, 200, {
+        ok: false, degraded: true, source: 'iptv-org', error: e.message,
+        items: [], total: 0,
+        note: 'iptv-org.github.io unreachable from this network — Live TV is offline here.'
+      });
+    }
+  }
+
   // ----------------------------------------------------- VidAPI catalog --
   if (p === '/api/vidapi/stats') {
     try {
@@ -318,23 +418,31 @@ async function handleApi(req, res, u) {
 
   if (p === '/api/embed-url') {
     const mt = u.searchParams.get('mediaType') === 'tv' ? 'tv' : 'movie';
+    const requested = u.searchParams.get('provider');
+    const provider = PROVIDERS.includes(requested) ? requested : 'vaplayer';
     const d = await tmdb.details(mt, u.searchParams.get('tmdbId'));
     const num = (name, dflt) => {
       const v = Number(u.searchParams.get(name));
       return Number.isFinite(v) && v >= 0 ? v : dflt;
     };
     return sendJson(res, 200, {
+      provider,
       embedUrl: embedFor(d, {
+        provider,
         season: num('season', 1),
         episode: num('episode', 1),
         resumeAt: num('resumeAt', undefined),
         startAt: num('startAt', undefined),
         autoplay: u.searchParams.get('autoplay') !== null ? u.searchParams.get('autoplay') !== '0' : undefined,
-        subUrl: u.searchParams.get('subUrl') || undefined,
+        // VidAPI-only: custom subtitle tracks and thumbnail previews.
+        // vidfast takes a built-in language code (`sub`) instead;
+        // moviesapi.to accepts no optional params at all.
+        subUrl: provider === 'vidfast' ? undefined : (u.searchParams.get('subUrl') || undefined),
         subLabel: u.searchParams.get('subLabel') || undefined,
-        subLang: u.searchParams.get('subLang') || undefined,
+        subLang: u.searchParams.get('subLang') || u.searchParams.get('sub') || undefined,
         subDefault: u.searchParams.get('subDefault') !== null ? u.searchParams.get('subDefault') !== 'false' : undefined,
-        thumbnails: u.searchParams.get('thumbnails') || undefined,
+        thumbnails: provider === 'vidfast' ? undefined : (u.searchParams.get('thumbnails') || undefined),
+        autoNext: u.searchParams.get('autoNext') !== null ? u.searchParams.get('autoNext') !== '0' : undefined,
         // Request the ceiling; the player clamps to the highest tier it actually has.
         quality: u.searchParams.get('quality') || process.env.PLAYER_QUALITY || '2160',
         title: d.title,
@@ -364,6 +472,7 @@ async function handlePage(req, res, u) {
   if (p === '/search') return page(res, 'search.html');
   if (p === '/catalog') return page(res, 'catalog.html');
   if (p === '/history') return page(res, 'history.html');
+  if (p === '/live') return page(res, 'live.html');
 
   if ((m = /^\/title\/(movie|tv)\/(\d+)$/.exec(p))) return page(res, 'title.html');
   // TMDB-id or IMDB-id (tt...) deep links; the player page resolves ids itself.

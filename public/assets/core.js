@@ -22,6 +22,123 @@
   const postJSON = (p, data) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) });
   const delJSON = (p) => api(p, { method: 'DELETE' });
 
+  // ------------------------------------------- local-first user data ----
+  /* Watchlist + watch progress are mirrored into localStorage so the user's
+     data always lives in the browser cache, even if the server's data/
+     directory is wiped or the machine moves. Reads come from localStorage
+     first (instant, offline-safe); writes go to localStorage immediately and
+     then best-effort to the server. Keys are namespaced under `jarvis.`. */
+
+  const LS_PROGRESS = 'jarvis.progress'; // { key: rec } — rec same shape as server
+  const LS_WATCHLIST = 'jarvis.watchlist'; // [item, ...] newest first
+
+  function lsRead(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (e) { return fallback; }
+  }
+  function lsWrite(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* quota/private mode */ }
+  }
+
+  function mediaKey(mediaType, tmdbId, season, episode) {
+    const base = String(mediaType) + ':' + String(Number(tmdbId));
+    return mediaType === 'tv' && season != null && episode != null
+      ? base + ':' + String(Number(season)) + ':' + String(Number(episode))
+      : base;
+  }
+
+  /** All locally known progress records, newest first. */
+  function localProgress() {
+    return Object.values(lsRead(LS_PROGRESS, {}))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  function localGetProgress(mediaType, tmdbId, season, episode) {
+    return lsRead(LS_PROGRESS, {})[mediaKey(mediaType, tmdbId, season, episode)] || null;
+  }
+
+  /** Save progress locally, then mirror to the server (best-effort). */
+  function setLocalProgress(mediaType, tmdbId, season, episode, seconds, duration, title, poster) {
+    const key = mediaKey(mediaType, tmdbId, season, episode);
+    const all = lsRead(LS_PROGRESS, {});
+    const rec = {
+      key,
+      mediaType,
+      tmdbId: Number(tmdbId),
+      season: mediaType === 'tv' ? Number(season) : null,
+      episode: mediaType === 'tv' ? Number(episode) : null,
+      seconds: Math.floor(seconds || 0),
+      duration: Math.floor(duration || 0),
+      pct: duration ? Math.min(100, Math.round((seconds / duration) * 100)) : null,
+      title: title || null,
+      poster: poster || null,
+      updatedAt: Date.now()
+    };
+    all[key] = rec;
+    lsWrite(LS_PROGRESS, all);
+    // Mirror to the server so cross-browser resume also works; ignore failures.
+    postJSON('/api/progress', rec).catch(() => {});
+    return rec;
+  }
+
+  function localDeleteProgress(mediaType, tmdbId, season, episode) {
+    const key = mediaKey(mediaType, tmdbId, season, episode);
+    const all = lsRead(LS_PROGRESS, {});
+    const existed = !!all[key];
+    delete all[key];
+    lsWrite(LS_PROGRESS, all);
+    delJSON('/api/history?' + new URLSearchParams({ mediaType, tmdbId,
+      season: mediaType === 'tv' ? season : '', episode: mediaType === 'tv' ? episode : ''
+    })).catch(() => {});
+    return existed;
+  }
+
+  function localDeleteAllProgress() {
+    const all = Object.values(lsRead(LS_PROGRESS, {})); // capture BEFORE clearing
+    lsWrite(LS_PROGRESS, {});
+    all.forEach(r => { // mirror server cleanup best-effort
+      if (r.mediaType) {
+        const qs = new URLSearchParams({ mediaType: r.mediaType, tmdbId: r.tmdbId,
+          season: r.mediaType === 'tv' ? r.season : '', episode: r.mediaType === 'tv' ? r.episode : ''});
+        delJSON('/api/history?' + qs).catch(() => {});
+      }
+    });
+    return all.length;
+  }
+
+  function localWatchlistHas(mediaType, tmdbId) {
+    return lsRead(LS_WATCHLIST, []).some(w => w.mediaType === mediaType && w.tmdbId === Number(tmdbId));
+  }
+
+  function localWatchlistAdd(item) {
+    const list = lsRead(LS_WATCHLIST, []);
+    if (list.some(w => w.mediaType === item.mediaType && w.tmdbId === Number(item.tmdbId))) return false;
+    list.unshift({
+      mediaType: item.mediaType,
+      tmdbId: Number(item.tmdbId),
+      title: item.title || 'Unknown',
+      poster: item.poster || null,
+      year: item.year || null,
+      rating: item.rating || null,
+      addedAt: Date.now()
+    });
+    lsWrite(LS_WATCHLIST, list);
+    postJSON('/api/watchlist', item).catch(() => {});
+    return true;
+  }
+
+  function localWatchlistRemove(mediaType, tmdbId) {
+    const before = lsRead(LS_WATCHLIST, []).length;
+    const next = lsRead(LS_WATCHLIST, []).filter(w => !(w.mediaType === mediaType && w.tmdbId === Number(tmdbId)));
+    lsWrite(LS_WATCHLIST, next);
+    delJSON('/api/watchlist?mediaType=' + encodeURIComponent(mediaType) + '&tmdbId=' + encodeURIComponent(tmdbId)).catch(() => {});
+    return next.length !== before;
+  }
+
+  function localWatchlist() { return lsRead(LS_WATCHLIST, []); }
+
   // --------------------------------------------------------- helpers ----
   function esc(s) {
     return String(s == null ? '' : s)
@@ -118,7 +235,7 @@
     bar.innerHTML =
       '<a class="brand" href="/"><span class="dot"></span>J.A.R.V.I.S.</a>' +
       '<nav>' +
-      ['Home:/', 'Films:/movies', 'Series:/series', 'Hot:/hot', 'Episodes:/episodes', 'History:/history', 'Catalog:/catalog']
+      ['Home:/', 'Films:/movies', 'Series:/series', 'Live:/live', 'Hot:/hot', 'Episodes:/episodes', 'History:/history', 'Catalog:/catalog']
         .map(pair => { const [label, href] = pair.split(':'); return '<a href="' + href + '" data-nav="' + href + '">' + label + '</a>'; })
         .join('') +
       '</nav>' +
@@ -196,6 +313,11 @@
   // --------------------------------------------------------- exports ----
   window.JARVIS = {
     PAGE, $, $$, api, getJSON, postJSON, delJSON,
+    // local-first user data store (browser cache-backed)
+    LS_PROGRESS, LS_WATCHLIST,
+    localProgress, localGetProgress, setLocalProgress,
+    localDeleteProgress, localDeleteAllProgress,
+    localWatchlist, localWatchlistHas, localWatchlistAdd, localWatchlistRemove,
     esc, fmtTime, fmtDate, fmtNum, watchHref, posterCard, epCardHref,
     runBoot, buildShell, healthCheck, updateHealthFromPayload,
     stateHTML, setState, footer
